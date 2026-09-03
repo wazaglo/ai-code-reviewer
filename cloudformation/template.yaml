@@ -613,7 +613,8 @@ Resources:
       RestApiId: !Ref ReviewApi
       ResourceId: !Ref WebhookResource
       HttpMethod: POST
-      AuthorizationType: NONE
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiAuthorizer
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
