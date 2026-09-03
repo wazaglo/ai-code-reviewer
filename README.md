@@ -14,8 +14,15 @@ Live since Phase-A testing — sample of a real review:
 
 ## Endpoint
 
+The live URL and IDs always come from the stack outputs:
+
+```bash
+aws cloudformation describe-stacks --stack-name pr-reviewer --region us-east-1 \
+  --query 'Stacks[0].Outputs[].{key:OutputKey,value:OutputValue}' --output table
 ```
-POST https://qwtyz9sq5i.execute-api.us-east-1.amazonaws.com/prod/webhook
+
+```
+POST https://6f7yrjyyfh.execute-api.us-east-1.amazonaws.com/prod/webhook
 ```
 
 Two ways to talk to it:
@@ -42,16 +49,17 @@ Open a PR and watch the AI comment appear. That's it.
 Everyone else must present a Cognito access token — anonymous callers get `403`.
 
 ```bash
-# Get a token (ask the admin to create your user in pool us-east-1_b8jDeIgeu)
+# Get a token (ask the admin to create your user; pool/client = stack outputs
+# UserPoolId / CognitoClientId)
 TOKEN=$(aws cognito-idp admin-initiate-auth \
-  --user-pool-id us-east-1_b8jDeIgeu \
-  --client-id 1b3ild527g3p199finoma0rvdq \
+  --user-pool-id $(aws cloudformation describe-stacks --stack-name pr-reviewer --region us-east-1 --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" --output text) \
+  --client-id $(aws cloudformation describe-stacks --stack-name pr-reviewer --region us-east-1 --query "Stacks[0].Outputs[?OutputKey=='CognitoClientId'].OutputValue" --output text) \
   --auth-flow ADMIN_NO_SRP_AUTH \
   --auth-parameters USERNAME=you@example.com,PASSWORD='yourpass' \
   --region us-east-1 --query AuthenticationResult.AccessToken --output text)
 
-# Use it
-curl -X POST https://qwtyz9sq5i.execute-api.us-east-1.amazonaws.com/prod/webhook \
+# Use it (WebhookUrl also available from stack outputs)
+curl -X POST https://6f7yrjyyfh.execute-api.us-east-1.amazonaws.com/prod/webhook \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d @pull-request-payload.json
