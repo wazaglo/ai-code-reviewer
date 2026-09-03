@@ -1,4 +1,3 @@
-# Dependencies for the authorizer Lambda
+# Runtime deps for the Cognito token authorizer Lambda.
+# RS256 verification pulls in `cryptography` transitively.
 PyJWT[crypto]==2.13.0
-
-This package lets the Lambda verify Cognito tokens using RS256 signing.

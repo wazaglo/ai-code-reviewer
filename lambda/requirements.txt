@@ -1,4 +1,2 @@
-# Dependencies for Lambda functions
+# Runtime deps for the worker/ingest Lambdas (delivered via the requests layer).
 requests==2.32.4
-
-This package lets the Lambdas talk to GitHub, GitLab, and other web services.
