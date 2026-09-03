@@ -111,8 +111,12 @@ if [[ "${DO_PACKAGE}" == "1" ]]; then
 
   echo "==> Ensuring S3 bucket exists..."
   if ! aws s3api head-bucket --bucket "${CODE_BUCKET}" --region "$REGION" 2>/dev/null; then
-    aws s3api create-bucket --bucket "${CODE_BUCKET}" --region "$REGION" \
-      --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
+    if [[ "$REGION" == "us-east-1" ]]; then
+      aws s3api create-bucket --bucket "${CODE_BUCKET}" --region "$REGION" >/dev/null
+    else
+      aws s3api create-bucket --bucket "${CODE_BUCKET}" --region "$REGION" \
+        --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
+    fi
   fi
 
   echo "==> Uploading artifacts..."
