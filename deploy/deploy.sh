@@ -116,7 +116,7 @@ if [[ "${DO_PACKAGE}" == "1" ]]; then
   # Copy provider module
   cp -r "${ROOT_DIR}/lambda/provider" "${TMPDIR}/provider"
   ( cd "${TMPDIR}" && zip -q -r lambda_function.zip lambda_function.py provider )
-  ( cd "${TMPDIR}" && zip -q -r ingest.zip ingest.py )
+  ( cd "${TMPDIR}" && zip -q -r ingest.zip ingest.py provider )
 
   echo "==> Building 'requests' layer..."
   mkdir -p "${TMPDIR}/layer/python"
