@@ -64,7 +64,6 @@ Parameters:
   GitHubWebhookSecret:
     Type: String
     NoEcho: true
-    Default: ''
     Description: >
       The secret you configure against your GitHub webhook. Used to verify the
       X-Hub-Signature-256 on every request so only GitHub can trigger reviews.
@@ -82,7 +81,6 @@ Parameters:
   GitLabWebhookSecret:
     Type: String
     NoEcho: true
-    Default: ''
     Description: >
       The secret token you configure against your GitLab webhook. Used to verify
       the X-Gitlab-Token header. Leave empty if not using GitLab.
@@ -671,5 +669,5 @@ Outputs:
 
   CostTableName:
     Description: DynamoDB table for cost attribution
-    Value: !If [CostTableEnabled, !Ref CostTableName, '']
+    Value: !Ref CostTableName
     Condition: CostTableEnabled
