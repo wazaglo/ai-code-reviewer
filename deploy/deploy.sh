@@ -176,7 +176,8 @@ DEPLOY_ARGS=(
       GitLabWebhookSecret="$GITLAB_WEBHOOK_SECRET" \
       GitLabToken="$GITLAB_TOKEN" \
       GitLabApiUrl="$GITLAB_API_URL" \
-      CostTableName="$COST_TABLE_NAME"
+      CostTableName="$COST_TABLE_NAME" \
+      DeploymentSalt="$(date +%s)"
 )
 
 if [[ "${DRY_RUN}" == "1" ]]; then

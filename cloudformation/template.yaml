@@ -171,6 +171,11 @@ Parameters:
     Default: ''
     Description: Email that receives cost/spend budget and alarm notifications.
 
+  DeploymentSalt:
+    Type: String
+    Default: v1
+    Description: Unique value that forces a new API Gateway stage deployment on every stack update (pass a timestamp from CI).
+
 Conditions:
   NotifyEnabled: !Not [ !Equals [ !Ref NotificationEmail, '' ] ]
   GitHubEnabled: !Not [ !Equals [ !Ref GitHubToken, '' ] ]
@@ -630,6 +635,7 @@ Resources:
     DependsOn: WebhookMethod
     Properties:
       RestApiId: !Ref ReviewApi
+      Description: !Sub 'Stack update ${DeploymentSalt}'
 
   # ==================================================================
   # WAF - rate-based rule (abuse / leaked-URL protection)
