@@ -1,0 +1,4 @@
+# Dependencies for Lambda functions
+requests==2.32.4
+
+This package lets the Lambdas talk to GitHub, GitLab, and other web services.

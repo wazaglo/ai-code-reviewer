@@ -1,0 +1,4 @@
+# Dependencies for the authorizer Lambda
+PyJWT[crypto]==2.13.0
+
+This package lets the Lambda verify Cognito tokens using RS256 signing.

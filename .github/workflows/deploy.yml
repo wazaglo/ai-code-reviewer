@@ -4,10 +4,13 @@ name: Deploy PR Reviewer
 # trigger). Wraps ./deploy/deploy.sh so infrastructure and Lambda changes are
 # released reproducibly from CI rather than a developer's machine.
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
     paths:
       - 'lambda/**'
+      - 'authorizer/**'
       - 'cloudformation/**'
       - 'deploy/**'
       - '.github/workflows/deploy.yml'
@@ -27,8 +30,8 @@ env:
   STACK_NAME: pr-reviewer
 
 jobs:
-  lint:
-    name: Lint Lambda + template
+  quality:
+    name: Lint + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,11 +40,19 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Validate Python syntax
-        run: python -m py_compile lambda/lambda_function.py lambda/ingest.py lambda/provider/__init__.py lambda/provider/github.py lambda/provider/gitlab.py lambda/provider/factory.py
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -r lambda/requirements.txt -r authorizer/requirements.txt
 
-      - name: Install cfn-lint
-        run: pip install cfn-lint
+      - name: Lint (ruff)
+        run: ruff check lambda authorizer tests
+
+      - name: Test (pytest)
+        run: pytest
+
+      - name: Validate Python syntax
+        run: python -m py_compile lambda/lambda_function.py lambda/ingest.py authorizer/authorizer.py
 
       - name: Lint CloudFormation
         run: cfn-lint cloudformation/template.yaml
@@ -49,7 +60,7 @@ jobs:
   deploy:
     name: Deploy stack
     runs-on: ubuntu-latest
-    needs: lint
+    needs: quality
     if: github.ref == 'refs/heads/main'
     concurrency: pr-reviewer-deploy
     steps:

@@ -10,7 +10,7 @@ from diagrams.aws.database import Dynamodb
 from diagrams.aws.integration import SimpleQueueServiceSqsQueue
 from diagrams.aws.ml import Bedrock
 from diagrams.aws.network import APIGateway
-from diagrams.aws.security import Cognito, SecretsManager, WAF
+from diagrams.aws.security import WAF, Cognito, SecretsManager
 from diagrams.onprem.vcs import Github, Gitlab
 
 graph_attr = {"pad": "0.4", "nodesep": "0.7", "ranksep": "1.0"}

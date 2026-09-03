@@ -1,0 +1,7 @@
+# Tools used for development (not deployed)
+
+pytest==8.3.4    # Run automated tests
+ruff==0.8.2      # Check code for problems (linting)
+cfn-lint==1.22.5 # Check CloudFormation templates for issues
+
+Install: pip install -r requirements-dev.txt

@@ -82,6 +82,26 @@ class GitHubProvider(CodeHostProvider):
     def get_repo_identifier(self, payload: dict[str, Any]) -> str:
         return payload.get('repository', {}).get('full_name', '')
 
+    def merge_pr(self, context: PRContext) -> bool:
+        """Merge the pull request. Return True on success."""
+        url = f'{context.api_base}/repos/{context.repo}/pulls/{context.pr_number}/merge'
+        resp = self._gh_request('PUT', url, context.token)
+        if resp is None or resp.status_code not in (200, 201):
+            log.error('github_merge_failed', extra={'status': resp.status_code if resp else 'none'})
+            return False
+        log.info('github_merged', extra={'pr': context.pr_number, 'repo': context.repo})
+        return True
+
+    def close_pr(self, context: PRContext) -> bool:
+        """Close the pull request. Return True on success."""
+        url = f'{context.api_base}/repos/{context.repo}/pulls/{context.pr_number}'
+        resp = self._gh_request('PATCH', url, context.token, json={'state': 'closed'})
+        if resp is None or resp.status_code not in (200, 201):
+            log.error('github_close_failed', extra={'status': resp.status_code if resp else 'none'})
+            return False
+        log.info('github_closed', extra={'pr': context.pr_number, 'repo': context.repo})
+        return True
+
     def _gh_request(self, method: str, url: str, token: str, max_retries: int = 4, **kwargs) -> requests.Response | None:
         headers = {
             'Authorization': f'token {token}',

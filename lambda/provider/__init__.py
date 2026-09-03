@@ -58,6 +58,16 @@ class CodeHostProvider(ABC):
         pass
 
     @abstractmethod
+    def merge_pr(self, context: PRContext) -> bool:
+        """Merge the PR/MR. Return True on success."""
+        pass
+
+    @abstractmethod
+    def close_pr(self, context: PRContext) -> bool:
+        """Close the PR/MR. Return True on success."""
+        pass
+
+    @abstractmethod
     def get_repo_identifier(self, payload: dict[str, Any]) -> str:
         """Get repo identifier for allowlist checking (e.g., 'org/repo')."""
         pass

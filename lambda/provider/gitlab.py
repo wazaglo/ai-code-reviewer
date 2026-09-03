@@ -1,5 +1,4 @@
 """GitLab provider implementation."""
-import hashlib
 import hmac
 import logging
 import os
@@ -48,7 +47,6 @@ class GitLabProvider(CodeHostProvider):
         mr_iid = mr.get('iid')
         project = payload.get('project', {})
         project_path = project.get('path_with_namespace')
-        gitlab_url = project.get('web_url', '').replace('/' + project_path, '') if project.get('web_url') else ''
 
         if not project_path or not mr_iid:
             return None
@@ -100,6 +98,28 @@ class GitLabProvider(CodeHostProvider):
     def get_repo_identifier(self, payload: dict[str, Any]) -> str:
         project = payload.get('project', {})
         return project.get('path_with_namespace', '')
+
+    def merge_pr(self, context: PRContext) -> bool:
+        """Merge the merge request. Return True on success."""
+        project_id = requests.utils.quote(context.repo, safe='')
+        url = f'{context.api_base}/projects/{project_id}/merge_requests/{context.pr_number}/merge'
+        resp = self._gl_request('PUT', url, context.token, json={'merge_when_pipeline_succeeds': False})
+        if resp is None or resp.status_code not in (200, 201):
+            log.error('gitlab_merge_failed', extra={'status': resp.status_code if resp else 'none'})
+            return False
+        log.info('gitlab_merged', extra={'mr': context.pr_number, 'repo': context.repo})
+        return True
+
+    def close_pr(self, context: PRContext) -> bool:
+        """Close the merge request. Return True on success."""
+        project_id = requests.utils.quote(context.repo, safe='')
+        url = f'{context.api_base}/projects/{project_id}/merge_requests/{context.pr_number}'
+        resp = self._gl_request('PUT', url, context.token, json={'state_event': 'close'})
+        if resp is None or resp.status_code not in (200, 201):
+            log.error('gitlab_close_failed', extra={'status': resp.status_code if resp else 'none'})
+            return False
+        log.info('gitlab_closed', extra={'mr': context.pr_number, 'repo': context.repo})
+        return True
 
     def _gl_request(self, method: str, url: str, token: str, max_retries: int = 4, **kwargs) -> requests.Response | None:
         headers = {

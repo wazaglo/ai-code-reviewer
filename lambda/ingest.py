@@ -10,12 +10,11 @@ It:
   3. Verifies the signature using the provider-specific method.
   4. Enqueues the validated payload to the review queue and returns 200.
 """
+import base64
 import json
 import os
-import base64
 
 import boto3
-
 from provider.factory import detect_provider, verify_signature_for_provider
 
 AWS_REGION = os.environ.get('AWS_REGION', os.environ.get('AWS_DEFAULT_REGION', 'us-east-1'))
@@ -55,7 +54,6 @@ def _verification_enabled(provider: str) -> bool:
 def handler(event, context):
     body = event.get('body', '') or ''
     if event.get('isBase64Encoded'):
-        import base64
         body = base64.b64decode(body)
     else:
         body = body.encode('utf-8')

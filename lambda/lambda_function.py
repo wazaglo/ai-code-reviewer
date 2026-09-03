@@ -1,43 +1,54 @@
 """PR review worker - consumes queued PR events and runs an AI review.
 
-Pipeline: SQS -> GitHub REST API (changed files + patches) -> Bedrock (Nova)
-analysis -> post findings back to GitHub as a PR comment.
+Pipeline: SQS -> GitHub/GitLab REST API (changed files + patches) -> Bedrock (Nova)
+analysis -> post findings back to PR as a comment -> merge/close based on severity.
 
 Design notes:
   * No git binary: the Lambda runtime does not ship one. Changed files and
-    their diffs come straight from the GitHub REST API, which is cheaper and
+    their diffs come straight from the provider REST API, which is cheaper and
     more reliable in Lambda than cloning.
-  * GitHub token from AWS Secrets Manager (preferred) or GITHUB_TOKEN env var.
+  * Provider tokens from AWS Secrets Manager (preferred) or *_TOKEN env var.
   * Dead-letter-aware: raise on failure so SQS retries and eventually moves
     the message to the DLQ (maxReceiveCount). Do NOT delete messages by hand -
     the Lambda event source mapping owns message deletion.
   * Optional repository allowlist to restrict which repos are analyzed.
-  * Structured JSON logging, retry with backoff on the GitHub API.
+  * Detailed cost tracking per PR in DynamoDB (model tokens, processing time).
+  * Auto-merge if no high-severity issues, auto-close if high-severity found.
+  * Structured JSON logging, retry with backoff on the API calls.
 """
 import json
 import logging
 import os
 import time
+from datetime import datetime
+from typing import Any
 
 import boto3
-import requests
+from provider import CodeHostProvider, PRContext
+from provider.factory import detect_provider, get_provider
 
 AWS_REGION = os.environ.get('AWS_REGION', os.environ.get('AWS_DEFAULT_REGION', 'us-east-1'))
 
 bedrock = boto3.client('bedrock-runtime', region_name=AWS_REGION)
 secretsmanager = boto3.client('secretsmanager', region_name=AWS_REGION)
+dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
 
 BEDROCK_MODEL = os.environ.get('BEDROCK_MODEL_ID', 'amazon.nova-lite-v1:0')
-GITHUB_TOKEN_ARN = os.environ.get('GITHUB_TOKEN_ARN', '')
-
 # Comma-separated allowlist, e.g. "acme/web,acme/app". Empty = allow all.
 REPO_ALLOWLIST = {r.strip() for r in os.environ.get('REPO_ALLOWLIST', '').split(',') if r.strip()}
+
+# Cost tracking
+COST_TABLE_NAME = os.environ.get('COST_TABLE_NAME', '')
+COST_TABLE = dynamodb.Table(COST_TABLE_NAME) if COST_TABLE_NAME else None
+
+# Auto-merge/close behavior
+MERGE_ON_LOW_SEVERITY = os.environ.get('MERGE_ON_LOW_SEVERITY', 'true').lower() == 'true'
+MERGE_ON_MEDIUM_SEVERITY = os.environ.get('MERGE_ON_MEDIUM_SEVERITY', 'false').lower() == 'true'
+CLOSE_ON_HIGH_SEVERITY = os.environ.get('CLOSE_ON_HIGH_SEVERITY', 'true').lower() == 'true'
 
 CODE_EXTENSIONS = {'.py', '.js', '.ts', '.java', '.go', '.rb', '.php', '.c', '.cpp', '.h', '.cs', '.rs'}
 MAX_FILES_PER_PR = 10
 MAX_DIFF_CHARS_PER_FILE = 6000
-
-GITHUB_API = 'https://api.github.com'
 
 log = logging.getLogger('pr-reviewer')
 if not log.handlers:
@@ -46,60 +57,82 @@ if not log.handlers:
     log.addHandler(_h)
 log.setLevel(logging.INFO)
 
-_token_cache = None
+_token_cache: dict[str, str] = {}
 
 
-def resolve_github_token():
-    """Secrets Manager first, then fall back to the GITHUB_TOKEN env var."""
-    global _token_cache
-    if _token_cache is not None:
-        return _token_cache
-    if GITHUB_TOKEN_ARN:
-        resp = secretsmanager.get_secret_value(SecretId=GITHUB_TOKEN_ARN)
-        _token_cache = resp['SecretString']
-    else:
-        _token_cache = os.environ.get('GITHUB_TOKEN') or ''
-    return _token_cache
+def resolve_token(provider: str) -> str:
+    """Secrets Manager first, then fall back to env var."""
+    cache_key = f'{provider}_token'
+    if cache_key in _token_cache:
+        return _token_cache[cache_key]
+
+    arn_env = f'{provider.upper()}_TOKEN_ARN'
+    token_env = f'{provider.upper()}_TOKEN'
+
+    arn = os.environ.get(arn_env, '')
+    if arn:
+        try:
+            resp = secretsmanager.get_secret_value(SecretId=arn)
+            _token_cache[cache_key] = resp['SecretString']
+            return _token_cache[cache_key]
+        except Exception as e:
+            log.warning(f'Failed to fetch token from Secrets Manager: {e}')
+
+    _token_cache[cache_key] = os.environ.get(token_env, '')
+    return _token_cache[cache_key]
 
 
-def allowlisted(repo_name):
+def allowlisted(repo_name: str) -> bool:
     return not REPO_ALLOWLIST or repo_name in REPO_ALLOWLIST
 
 
-def _gh_request(method, url, token, max_retries=4, **kwargs):
-    """GitHub API request with exponential backoff on 429/5xx."""
-    headers = {
-        'Authorization': f'token {token}',
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-    }
-    resp = None
-    for attempt in range(max_retries):
-        resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
-        if resp.status_code in (403, 429, 500, 502, 503, 504):
-            retry_after = int(resp.headers.get('Retry-After', 0) or 0)
-            wait = retry_after or (2 ** attempt)
-            log.info('github_retry', extra={'url': url, 'status': resp.status_code, 'wait': wait})
-            time.sleep(min(wait, 30))
-            continue
-        return resp
-    return resp
+def track_cost(
+    provider: str,
+    repo: str,
+    pr_number: int,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    files_analyzed: int,
+    processing_time_ms: int,
+    cost_usd: float,
+    findings_count: int,
+) -> None:
+    """Record detailed cost attribution per PR."""
+    if not COST_TABLE:
+        return
+
+    pk = f'{provider}:{repo}:{datetime.utcnow().strftime("%Y-%m")}'
+    sk = f'PR:{pr_number}'
+    ttl = int(time.time()) + (30 * 24 * 3600)  # 30 days
+
+    try:
+        COST_TABLE.put_item(
+            Item={
+                'pk': pk,
+                'sk': sk,
+                'ttl': ttl,
+                'model': model_id,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'files_analyzed': files_analyzed,
+                'processing_time_ms': processing_time_ms,
+                'cost_usd': cost_usd,
+                'findings_count': findings_count,
+                'timestamp': datetime.utcnow().isoformat(),
+            }
+        )
+        log.info('cost_tracked', extra={'pk': pk, 'sk': sk, 'cost_usd': cost_usd})
+    except Exception as e:
+        log.error('cost_tracking_failed', extra={'error': str(e)})
 
 
-def fetch_pr_files(repo, pr_number, token):
-    """Changed files for a PR via REST. Each item has filename/status/patch."""
-    url = f'{GITHUB_API}/repos/{repo}/pulls/{pr_number}/files?per_page=100'
-    resp = _gh_request('GET', url, token)
-    if resp is None or resp.status_code != 200:
-        raise RuntimeError(f'GitHub API files failed: {resp.status_code if resp is not None else "no response"} {resp.text[:200] if resp is not None else ""}')
-    return resp.json()
-
-
-def analyze_with_nova(filepath, diff_text):
+def analyze_with_nova(filepath: str, diff_text: str) -> dict[str, Any]:
+    """Analyze diff with Bedrock Nova. Returns findings and token usage."""
     if len(diff_text) > MAX_DIFF_CHARS_PER_FILE:
         diff_text = diff_text[:MAX_DIFF_CHARS_PER_FILE] + '\n... (diff truncated)'
 
-    prompt = f"""You are an expert code reviewer analyzing the DIFF of a pull request.
+    prompt = f"""You are an expert code reviewer analyzing the DIFF of a pull/merge request.
 
 File: {filepath}
 
@@ -124,6 +157,7 @@ Return your findings as a JSON array with this exact structure and nothing else:
 Use severity values: "high", "medium", "low".
 If no issues found, return: []"""
 
+    start_time = time.time()
     try:
         response = bedrock.converse(
             modelId=BEDROCK_MODEL,
@@ -133,42 +167,84 @@ If no issues found, return: []"""
         text = response['output']['message']['content'][0]['text']
         start, end = text.find('['), text.rfind(']') + 1
         if start != -1 and end > start:
-            return json.loads(text[start:end])
-        return []
-    except Exception as e:  # noqa: BLE001
+            findings = json.loads(text[start:end])
+        else:
+            findings = []
+
+        # Get token usage from response
+        token_usage = response.get('usage', {})
+        input_tokens = token_usage.get('inputTokens', 0)
+        output_tokens = token_usage.get('outputTokens', 0)
+        return {
+            'findings': findings,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'processing_time_ms': int((time.time() - start_time) * 1000),
+        }
+    except Exception as e:
         log.error('bedrock_error', extra={'error': str(e)[:500], 'model': BEDROCK_MODEL})
-        raise
+        return {
+            'findings': [],
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'processing_time_ms': int((time.time() - start_time) * 1000),
+            'error': str(e)[:500],
+        }
 
 
-def build_comment(findings):
+def build_comment(findings: list[dict[str, Any]]) -> str:
+    """Build review comment body from findings."""
     if not findings:
-        return '\u2705 **AI Review Complete**\n\nNo issues detected in this PR!'
-    emoji = {'high': '\U0001F534', 'medium': '\U0001F7E1', 'low': '\U0001F535'}
+        return '✅ **AI Review Complete**\n\nNo issues detected in this PR!'
+    emoji = {'high': '🔴', 'medium': '🟠', 'low': '🔵'}
     lines = []
     for f in findings:
         sev = (f.get('severity') or 'medium').lower()
-        marker = emoji.get(sev, '\U0001F7E1')
+        marker = emoji.get(sev, '🟠')
         file_part = f"**{f['file']}** - " if f.get('file') else ''
         lines.append(f"{marker} **{sev.upper()}** {file_part}{f.get('message', '')}")
     return (
-        f'## \U0001F916 AI Code Review\n\nFound {len(findings)} issue(s):\n\n'
+        f'## 🤖 AI Code Review\n\nFound {len(findings)} issue(s):\n\n'
         + '\n'.join(lines)
         + '\n\n---\n*Generated by Amazon Nova AI*'
     )
 
 
-def post_github_review(repo, pr_number, findings, token):
-    body = build_comment(findings)
-    url = f'{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments'
-    resp = _gh_request('POST', url, token, json={'body': body})
-    if resp is None or resp.status_code not in (200, 201):
-        status = resp.status_code if resp is not None else 'none'
-        text = resp.text[:200] if resp is not None else ''
-        raise RuntimeError(f'comment post failed: {status} {text}')
-    log.info('review_posted', extra={'status': resp.status_code, 'pr': pr_number})
+def should_merge_or_close(findings: list[dict[str, Any]]) -> str:
+    """Determine if PR should be auto-merged or closed based on severity.
+
+    Returns: 'merge', 'close', or None
+    """
+    if not findings:
+        return 'merge' if MERGE_ON_LOW_SEVERITY else None
+
+    high_count = sum(1 for f in findings if (f.get('severity') or 'medium').lower() == 'high')
+
+    if high_count > 0 and CLOSE_ON_HIGH_SEVERITY:
+        return 'close'
+    if high_count == 0 and MERGE_ON_MEDIUM_SEVERITY:
+        return 'merge'
+    if high_count == 0 and MERGE_ON_LOW_SEVERITY:
+        return 'merge'
+    return None
 
 
-def handler(event, context):
+def post_provider_comment(provider: CodeHostProvider, context: PRContext, body: str) -> bool:
+    """Post review comment to the PR/MR."""
+    return provider.post_review_comment(context, body)
+
+
+def merge_pr(provider: CodeHostProvider, context: PRContext) -> bool:
+    """Merge the PR/MR."""
+    return provider.merge_pr(context)
+
+
+def close_pr(provider: CodeHostProvider, context: PRContext) -> bool:
+    """Close the PR/MR."""
+    return provider.close_pr(context)
+
+
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log.info('sqs_event', extra={'records': len(event.get('Records', []))})
 
     for record in event.get('Records', []):
@@ -176,44 +252,111 @@ def handler(event, context):
             payload = json.loads(record['body'])
         except (ValueError, KeyError) as e:
             log.error('bad_message_body', extra={'error': str(e), 'body': record.get('body', '')[:200]})
-            continue  # unparseable poison: drop it, do not spin the queue
+            continue
 
-        action = payload.get('action')
-        pr_number = payload.get('number')
-        repo_name = payload.get('repository', {}).get('full_name')
+        # Detect provider from payload
+        provider_name = detect_provider(payload, {})
+        if not provider_name:
+            log.info('skip_unknown_provider', extra={'payload_keys': list(payload.keys())})
+            continue
 
-        if action not in ('opened', 'synchronize', 'reopened'):
+        provider = get_provider(provider_name)
+        if not provider:
+            log.error('unknown_provider', extra={'provider': provider_name})
+            continue
+
+        # Extract context from payload
+        pr_context = provider.extract_pr_context(payload)
+        if not pr_context:
+            log.info('skip_pr_context', extra={'provider': provider_name})
+            continue
+
+        action = payload.get('action') or payload.get('object_attributes', {}).get('action')
+        repo_name = provider.get_repo_identifier(payload)
+
+        if action not in ('opened', 'synchronize', 'reopened', 'open', 'update', 'reopen'):
             log.info('skip_action', extra={'action': action})
             continue
 
-        if not repo_name or not allowlisted(repo_name) or not pr_number:
+        if not repo_name or not allowlisted(repo_name) or not pr_context.pr_number:
             log.info('skip_repo', extra={'repo': repo_name})
             continue
 
-        token = resolve_github_token()
-        log.info('processing_pr', extra={'pr': pr_number, 'repo': repo_name})
+        token = resolve_token(provider_name)
+        log.info('processing_pr', extra={'pr': pr_context.pr_number, 'repo': repo_name, 'provider': provider_name})
 
-        changed = fetch_pr_files(repo_name, pr_number, token)
-        code_files = [
-            f for f in changed
-            if os.path.splitext(f.get('filename', ''))[1] in CODE_EXTENSIONS and f.get('patch')
-        ][:MAX_FILES_PER_PR]
-        log.info('files_to_analyze', extra={'count': len(code_files), 'pr': pr_number})
+        # Fetch and analyze files
+        try:
+            files = provider.fetch_pr_files(pr_context)
+        except Exception as e:
+            log.error('fetch_files_failed', extra={'error': str(e)})
+            continue
 
-        all_findings = []
+        code_files = [f for f in files if os.path.splitext(f.filename)[1] in CODE_EXTENSIONS and f.patch][:MAX_FILES_PER_PR]
+        log.info('files_to_analyze', extra={'count': len(code_files), 'pr': pr_context.pr_number})
+
+        # Track totals
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_processing_time = 0
+        all_findings: list[dict[str, Any]] = []
+
+        start_time = time.time()
         for entry in code_files:
-            filepath = entry['filename']
-            log.info('analyzing_file', extra={'file': filepath, 'pr': pr_number})
-            findings = analyze_with_nova(filepath, entry['patch'])
-            for f in findings:
+            filepath = entry.filename
+            log.info('analyzing_file', extra={'file': filepath, 'pr': pr_context.pr_number})
+            result = analyze_with_nova(filepath, entry.patch)
+            total_input_tokens += result.get('input_tokens', 0)
+            total_output_tokens += result.get('output_tokens', 0)
+            total_processing_time += result.get('processing_time_ms', 0)
+            for f in result.get('findings', []):
                 f['file'] = filepath
-            all_findings.extend(findings)
+            all_findings.extend(result.get('findings', []))
 
-        if token:
-            post_github_review(repo_name, pr_number, all_findings, token)
+        processing_time_total = int((time.time() - start_time) * 1000)
+        total_processing_time += processing_time_total
+
+        # Calculate approximate cost (pricing as of 2026-09)
+        # amazon.nova-lite-v1: $0.00000013/inv + $0.00000003/inv tokens (input), $0.00000051/inv tokens (output)
+        if BEDROCK_MODEL == 'amazon.nova-lite-v1:0':
+            cost_usd = 0.00000013 + (total_input_tokens * 0.00000003) + (total_output_tokens * 0.00000051)
         else:
-            log.info('dry_run_findings', extra={'findings': json.dumps(all_findings)[:2000]})
+            # Fallback: $0.001 per 1M input tokens, $0.003 per 1M output tokens
+            cost_usd = (total_input_tokens / 1_000_000 * 0.001) + (total_output_tokens / 1_000_000 * 0.003)
 
-        log.info('pr_processed', extra={'pr': pr_number, 'findings': len(all_findings)})
+        # Post review comment
+        body = build_comment(all_findings)
+        post_provider_comment(provider, pr_context, body)
+
+        # Determine if we should merge or close
+        action = should_merge_or_close(all_findings)
+        if action == 'merge' and token:
+            log.info('auto_merge_attempt', extra={'pr': pr_context.pr_number, 'findings': len(all_findings)})
+            merge_pr(provider, pr_context)
+        elif action == 'close' and token:
+            log.info('auto_close_attempt', extra={'pr': pr_context.pr_number, 'high_severity': sum(1 for f in all_findings if f.get('severity') == 'high')})
+            close_pr(provider, pr_context)
+
+        # Track cost
+        track_cost(
+            provider=provider_name,
+            repo=repo_name,
+            pr_number=pr_context.pr_number,
+            model_id=BEDROCK_MODEL,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            files_analyzed=len(code_files),
+            processing_time_ms=total_processing_time,
+            cost_usd=round(cost_usd, 6),
+            findings_count=len(all_findings),
+        )
+
+        log.info('pr_processed', extra={
+            'pr': pr_context.pr_number,
+            'provider': provider_name,
+            'findings': len(all_findings),
+            'cost_usd': round(cost_usd, 6),
+            'tokens': total_input_tokens + total_output_tokens,
+        })
 
     return {'statusCode': 200, 'body': 'Processing complete'}

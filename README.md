@@ -82,6 +82,37 @@ cd ai-code-reviewer
 - CI/CD: push to `main` → lint → deploy (`.github/workflows/deploy.yml`)
 - Architecture diagram source: `docs/architecture.py` (`pip install diagrams`)
 
+## Cost tracking
+
+Every PR review is tracked in DynamoDB with:
+- Input/output tokens used
+- Processing time (ms)
+- Files analyzed
+- USD cost
+- Number of findings
+
+Cost attribution keys: `provider:repo:month` (partition) and `PR:{number}` (sort).
+
+## Auto-merge / Auto-close behavior
+
+The worker can automatically merge or close PRs based on review severity:
+
+| Condition | Action | Environment Variable |
+|-----------|--------|---------------------|
+| No high-severity issues | Merge | `MERGE_ON_LOW_SEVERITY=true` (default) |
+| No high-severity issues | Merge | `MERGE_ON_MEDIUM_SEVERITY=true` (default: false) |
+| High-severity issues found | Close | `CLOSE_ON_HIGH_SEVERITY=true` (default) |
+
+To customize, set environment variables in the Worker Lambda:
+
+```yaml
+Environment:
+  Variables:
+    MERGE_ON_LOW_SEVERITY: 'false'
+    MERGE_ON_MEDIUM_SEVERITY: 'true'
+    CLOSE_ON_HIGH_SEVERITY: 'true'
+```
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -90,6 +121,7 @@ cd ai-code-reviewer
 | API call 403 | Missing/expired `Authorization: Bearer <token>` |
 | 429 | Over rate limit — slow down |
 | No AI comment | Check Lambda logs: `aws logs tail /aws/lambda/PR-Review-Worker --follow` |
+| Auto-merge not working | Check that `GITHUB_TOKEN` or `GITLAB_TOKEN` has write permissions |
 
 ## License
 

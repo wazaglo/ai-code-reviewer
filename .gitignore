@@ -1,21 +1,33 @@
-# Deploy artifacts
-lambda_function.zip
-requests-layer.zip
-*.pyc
+# Deploy artifacts (built by deploy.sh, uploaded to S3 — never commit)
+*.zip
 build/
+
+# Python
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Generated graphviz source (diagrams lib leaves this next to the .png/.svg)
+docs/architecture
 
 # AWS / local config
 .aws/
+.aws-*
 .env
 *.out
 
-# Secrets - never commit tokens or credentials
+# Secrets — never commit tokens or credentials
 *.secrets
 secrets.*
 .env.local
+*token*
+!*token.py
 
 # Editor / OS
 .DS_Store
 .idea/
 .vscode/
-*.swpdocs/architecture
+*.swp
+*.swo

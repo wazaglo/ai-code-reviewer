@@ -2,9 +2,10 @@
 #
 # deploy.sh - one-shot deployment of the AI Code Reviewer stack.
 #
-# Packages the two Lambda functions + the `requests` layer, uploads them to S3,
-# and deploys the CloudFormation stack. Model selection, rate limits, secrets
-# and repo allowlist are all configurable.
+# Packages the three Lambda functions (worker, ingest, Cognito authorizer) and
+# the `requests` layer, uploads them to S3, and deploys the CloudFormation
+# stack. Model selection, rate limits, secrets and repo allowlist are all
+# configurable.
 #
 # Usage:
 #   ./deploy/deploy.sh \
@@ -58,6 +59,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LAMBDA_FILE="${ROOT_DIR}/lambda/lambda_function.py"
 INGEST_FILE="${ROOT_DIR}/lambda/ingest.py"
+AUTHORIZER_FILE="${ROOT_DIR}/authorizer/authorizer.py"
 
 # Default model comes from config/model_config.yaml, the single source of truth.
 MODEL="$(sed -n 's/^[[:space:]]*BEDROCK_MODEL_ID:[[:space:]]*//p' "${ROOT_DIR}/config/model_config.yaml" | head -1)"
@@ -118,9 +120,17 @@ if [[ "${DO_PACKAGE}" == "1" ]]; then
   ( cd "${TMPDIR}" && zip -q -r lambda_function.zip lambda_function.py provider )
   ( cd "${TMPDIR}" && zip -q -r ingest.zip ingest.py provider )
 
+  echo "==> Building authorizer Lambda (bundles PyJWT)..."
+  mkdir -p "${TMPDIR}/authz"
+  cp "${AUTHORIZER_FILE}" "${TMPDIR}/authz/authorizer.py"
+  pip install -r "${ROOT_DIR}/authorizer/requirements.txt" --target "${TMPDIR}/authz" --quiet
+  find "${TMPDIR}/authz/bin" -type f -delete 2>/dev/null || true
+  rmdir "${TMPDIR}/authz/bin" 2>/dev/null || true
+  ( cd "${TMPDIR}/authz" && zip -q -r "${TMPDIR}/authorizer.zip" . )
+
   echo "==> Building 'requests' layer..."
   mkdir -p "${TMPDIR}/layer/python"
-  pip install requests --target "${TMPDIR}/layer/python" --quiet
+  pip install -r "${ROOT_DIR}/lambda/requirements.txt" --target "${TMPDIR}/layer/python" --quiet
   find "${TMPDIR}/layer/python/bin" -type f -delete 2>/dev/null || true
   rmdir "${TMPDIR}/layer/python/bin" 2>/dev/null || true
   ( cd "${TMPDIR}/layer" && zip -q -r "${TMPDIR}/requests-layer.zip" python )
@@ -138,6 +148,7 @@ if [[ "${DO_PACKAGE}" == "1" ]]; then
   echo "==> Uploading artifacts..."
   aws s3 cp "${TMPDIR}/lambda_function.zip"  "s3://${CODE_BUCKET}/${KEY_PREFIX}/lambda_function.zip"  --region "$REGION" --quiet
   aws s3 cp "${TMPDIR}/ingest.zip"           "s3://${CODE_BUCKET}/${KEY_PREFIX}/ingest.zip"           --region "$REGION" --quiet
+  aws s3 cp "${TMPDIR}/authorizer.zip"       "s3://${CODE_BUCKET}/${KEY_PREFIX}/authorizer.zip"       --region "$REGION" --quiet
   aws s3 cp "${TMPDIR}/requests-layer.zip"   "s3://${CODE_BUCKET}/${KEY_PREFIX}/requests-layer.zip"   --region "$REGION" --quiet
 fi
 
