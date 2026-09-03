@@ -1,5 +1,20 @@
 """Worker pure functions: comment rendering and repo allowlist."""
+from decimal import Decimal
+
 import lambda_function as w
+
+
+def test_track_cost_uses_decimal(monkeypatch):
+    items = []
+
+    class FakeTable:
+        def put_item(self, Item):
+            items.append(Item)
+
+    monkeypatch.setattr(w, 'COST_TABLE', FakeTable())
+    w.track_cost('github', 'a/b', 1, 'm', 10, 20, 1, 5, 0.001234, 2)
+    assert len(items) == 1
+    assert isinstance(items[0]['cost_usd'], Decimal)
 
 
 def test_build_comment_clean_review():

@@ -21,6 +21,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import boto3
@@ -117,14 +118,14 @@ def track_cost(
                 'output_tokens': output_tokens,
                 'files_analyzed': files_analyzed,
                 'processing_time_ms': processing_time_ms,
-                'cost_usd': cost_usd,
+                'cost_usd': Decimal(str(cost_usd)),
                 'findings_count': findings_count,
                 'timestamp': datetime.utcnow().isoformat(),
             }
         )
         log.info('cost_tracked', extra={'pk': pk, 'sk': sk, 'cost_usd': cost_usd})
     except Exception as e:
-        log.error('cost_tracking_failed', extra={'error': str(e)})
+        log.error('cost_tracking_failed', extra={'error': str(e)}, exc_info=True)
 
 
 def analyze_with_nova(filepath: str, diff_text: str) -> dict[str, Any]:
@@ -283,6 +284,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             continue
 
         token = resolve_token(provider_name)
+        if token:
+            pr_context.token = token
         log.info('processing_pr', extra={'pr': pr_context.pr_number, 'repo': repo_name, 'provider': provider_name})
 
         # Fetch and analyze files
