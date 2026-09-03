@@ -1,9 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  AI Code Reviewer - production-hardened automated PR review on Amazon Bedrock.
+  AI Code Reviewer - production-hardened automated PR/MR review on Amazon Bedrock.
   API Gateway (webhook, signature-verified) -> Ingest Lambda -> SQS (+DLQ) ->
-  Worker Lambda -> Bedrock Nova -> GitHub comment. Secrets in AWS Secrets
+  Worker Lambda -> Bedrock Nova -> GitHub/GitLab comment. Secrets in AWS Secrets
   Manager, X-Ray tracing, CloudWatch alarms, WAF + stage throttling for cost guard.
+  Cost attribution via DynamoDB per provider/org/repo/month.
 
 Parameters:
   # ------------------------------------------------------------------
@@ -24,12 +25,12 @@ Parameters:
   QueueName:
     Type: String
     Default: PR-Review-Queue
-    Description: SQS queue that buffers GitHub webhook events.
+    Description: SQS queue that buffers webhook events.
 
   LambdaFunctionName:
     Type: String
     Default: PR-Review-Worker
-    Description: Worker Lambda that processes queued pull requests.
+    Description: Worker Lambda that processes queued pull/merge requests.
 
   IngestFunctionName:
     Type: String
@@ -41,12 +42,17 @@ Parameters:
     Default: PR-Reviewer-API
     Description: REST API Gateway name.
 
+  CostTableName:
+    Type: String
+    Default: PR-Review-CostAttribution
+    Description: DynamoDB table for cost attribution per provider/org/repo/month.
+
   # ------------------------------------------------------------------
   # Bedrock model - change the ARN/model here in ONE place
   # ------------------------------------------------------------------
   BedrockModelId:
     Type: String
-    Default: 'amazon.nova-2-lite-v1:0'
+    Default: 'amazon.nova-lite-v1:0'
     AllowedPattern: '.+'
     Description: >
       Bedrock foundation-model ID used for AI analysis. Change to switch models;
@@ -58,17 +64,41 @@ Parameters:
   GitHubWebhookSecret:
     Type: String
     NoEcho: true
+    Default: ''
     Description: >
       The secret you configure against your GitHub webhook. Used to verify the
       X-Hub-Signature-256 on every request so only GitHub can trigger reviews.
+      Leave empty if not using GitHub.
 
   GitHubToken:
     Type: String
     NoEcho: true
+    Default: ''
     Description: >
       GitHub Personal Access Token (fine-grained, contents:read +
       pull_requests:write) used to clone and post comments. Leave empty for
-      public-repo dry runs.
+      public-repo dry runs or if not using GitHub.
+
+  GitLabWebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >
+      The secret token you configure against your GitLab webhook. Used to verify
+      the X-Gitlab-Token header. Leave empty if not using GitLab.
+
+  GitLabToken:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >
+      GitLab Personal Access Token (api scope) used to fetch MR changes and post
+      notes. Leave empty if not using GitLab.
+
+  GitLabApiUrl:
+    Type: String
+    Default: 'https://gitlab.com/api/v4'
+    Description: GitLab API base URL (for self-hosted instances).
 
   # ------------------------------------------------------------------
   # Compute sizing
@@ -99,10 +129,11 @@ Parameters:
     MaxValue: 1000
 
   # Comma-separated org/repo allowlist. Default empty = allow anything.
+  # Format: github:org/repo,gitlab:group/project
   RepoAllowlist:
     Type: String
     Default: ''
-    Description: 'Comma-separated list of allowed org/repo, e.g. acme/web,acme/app. Empty allows all.'
+    Description: 'Comma-separated list of allowed repos, e.g. github:acme/web,gitlab:acme/backend. Empty allows all.'
 
   # ------------------------------------------------------------------
   # Rate limiting / cost protection
@@ -137,6 +168,9 @@ Parameters:
 
 Conditions:
   NotifyEnabled: !Not [ !Equals [ !Ref NotificationEmail, '' ] ]
+  GitHubEnabled: !Not [ !Equals [ !Ref GitHubToken, '' ] ]
+  GitLabEnabled: !Not [ !Equals [ !Ref GitLabToken, '' ] ]
+  CostTableEnabled: !Not [ !Equals [ !Ref CostTableName, '' ] ]
 
 Resources:
   # ==================================================================
@@ -144,15 +178,57 @@ Resources:
   # ==================================================================
   WebhookSecret:
     Type: AWS::SecretsManager::Secret
+    Condition: GitHubEnabled
     Properties:
       Description: GitHub webhook HMAC secret used to verify webhook signatures
       SecretString: !Ref GitHubWebhookSecret
 
+  GitLabWebhookSecretStore:
+    Type: AWS::SecretsManager::Secret
+    Condition: GitLabEnabled
+    Properties:
+      Description: GitLab webhook secret token used to verify webhook signatures
+      SecretString: !Ref GitLabWebhookSecret
+
   GitHubTokenSecret:
     Type: AWS::SecretsManager::Secret
+    Condition: GitHubEnabled
     Properties:
       Description: GitHub PAT used to clone repos and post PR comments
       SecretString: !Ref GitHubToken
+
+  GitLabTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: GitLabEnabled
+    Properties:
+      Description: GitLab PAT used to fetch MR changes and post notes
+      SecretString: !Ref GitLabToken
+
+  # ==================================================================
+  # DynamoDB - Cost Attribution Table
+  # ==================================================================
+  CostAttributionTable:
+    Type: AWS::DynamoDB::Table
+    Condition: CostTableEnabled
+    Properties:
+      TableName: !Ref CostTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: PR-Reviewer
 
   # ==================================================================
   # SQS - main review queue + dead-letter queue
@@ -209,12 +285,11 @@ Resources:
               - xray:PutTelemetryRecords
             Resource: '*'
 
-  # Separate policy ONLY when a webhook secret is configured (avoids an
-  # empty Resource on the conditional secrets statement).
-  IngestSecretPolicy:
+  IngestGitHubSecretPolicy:
     Type: AWS::IAM::Policy
+    Condition: GitHubEnabled
     Properties:
-      PolicyName: PRReview-Ingest-Secret
+      PolicyName: PRReview-Ingest-GitHubSecret
       Roles: [!Ref IngestRole]
       PolicyDocument:
         Version: '2012-10-17'
@@ -222,6 +297,19 @@ Resources:
           - Effect: Allow
             Action: secretsmanager:GetSecretValue
             Resource: !Ref WebhookSecret
+
+  IngestGitLabSecretPolicy:
+    Type: AWS::IAM::Policy
+    Condition: GitLabEnabled
+    Properties:
+      PolicyName: PRReview-Ingest-GitLabSecret
+      Roles: [!Ref IngestRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GitLabWebhookSecretStore
 
   # ==================================================================
   # IAM - worker Lambda role (read + analyze + post)
@@ -251,9 +339,6 @@ Resources:
               - sqs:ReceiveMessage
             Resource: !GetAtt ReviewQueue.Arn
           - Effect: Allow
-            Action: secretsmanager:GetSecretValue
-            Resource: !Ref GitHubTokenSecret
-          - Effect: Allow
             Action: bedrock:InvokeModel
             Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
           - Effect: Allow
@@ -267,6 +352,47 @@ Resources:
               - xray:PutTraceSegments
               - xray:PutTelemetryRecords
             Resource: '*'
+
+  WorkerGitHubSecretPolicy:
+    Type: AWS::IAM::Policy
+    Condition: GitHubEnabled
+    Properties:
+      PolicyName: PRReview-Worker-GitHubSecret
+      Roles: [!Ref WorkerRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GitHubTokenSecret
+
+  WorkerGitLabSecretPolicy:
+    Type: AWS::IAM::Policy
+    Condition: GitLabEnabled
+    Properties:
+      PolicyName: PRReview-Worker-GitLabSecret
+      Roles: [!Ref WorkerRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GitLabTokenSecret
+
+  WorkerCostTablePolicy:
+    Type: AWS::IAM::Policy
+    Condition: CostTableEnabled
+    Properties:
+      PolicyName: PRReview-Worker-CostTable
+      Roles: [!Ref WorkerRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:UpdateItem
+              - dynamodb:PutItem
+            Resource: !GetAtt CostAttributionTable.Arn
 
   # ==================================================================
   # Lambda layer - bundles the `requests` dependency
@@ -289,7 +415,6 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn:
       - IngestRolePolicies
-      - IngestSecretPolicy
     Properties:
       FunctionName: !Ref IngestFunctionName
       Role: !GetAtt IngestRole.Arn
@@ -305,7 +430,8 @@ Resources:
       Environment:
         Variables:
           QUEUE_URL: !Ref ReviewQueue
-          WEBSECRET_ARN: !Ref WebhookSecret
+          WEBSECRET_ARN: !If [GitHubEnabled, !Ref WebhookSecret, '']
+          GITLAB_WEBSECRET_ARN: !If [GitLabEnabled, !Ref GitLabWebhookSecretStore, '']
 
   # Allow API Gateway to invoke the ingest function from the webhook method.
   IngestInvokePermission:
@@ -321,7 +447,8 @@ Resources:
   # ==================================================================
   WorkerFunction:
     Type: AWS::Lambda::Function
-    DependsOn: WorkerRolePolicies
+    DependsOn:
+      - WorkerRolePolicies
     Properties:
       FunctionName: !Ref LambdaFunctionName
       Role: !GetAtt WorkerRole.Arn
@@ -339,8 +466,11 @@ Resources:
         Variables:
           QUEUE_URL: !Ref ReviewQueue
           BEDROCK_MODEL_ID: !Ref BedrockModelId
-          GITHUB_TOKEN_ARN: !Ref GitHubTokenSecret
+          GITHUB_TOKEN_ARN: !If [GitHubEnabled, !Ref GitHubTokenSecret, '']
+          GITLAB_TOKEN_ARN: !If [GitLabEnabled, !Ref GitLabTokenSecret, '']
+          GITLAB_API_URL: !Ref GitLabApiUrl
           REPO_ALLOWLIST: !Ref RepoAllowlist
+          COST_TABLE_NAME: !If [CostTableEnabled, !Ref CostTableName, '']
 
   # SQS event source -> triggers the worker (delivers failures to the DLQ)
   WorkerEventSource:
@@ -389,7 +519,6 @@ Resources:
     DependsOn: WebhookMethod
     Properties:
       RestApiId: !Ref ReviewApi
-      StageName: prod
 
   # ==================================================================
   # WAF - rate-based rule (abuse / leaked-URL protection)
@@ -420,6 +549,7 @@ Resources:
 
   WebAclAssociation:
     Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: ProdStage
     Properties:
       ResourceArn: !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis/${ReviewApi}/stages/prod'
       WebACLArn: !GetAtt WebAcl.Arn
@@ -516,7 +646,7 @@ Resources:
 
 Outputs:
   WebhookUrl:
-    Description: Register this URL as the GitHub webhook. GitHub signs every request.
+    Description: Register this URL as the GitHub/GitLab webhook. Signatures verified per provider.
     Value: !Sub 'https://${ReviewApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook'
 
   QueueUrl:
@@ -538,3 +668,8 @@ Outputs:
   ModelId:
     Description: Bedrock model currently in use
     Value: !Ref BedrockModelId
+
+  CostTableName:
+    Description: DynamoDB table for cost attribution
+    Value: !If [CostTableEnabled, !Ref CostTableName, '']
+    Condition: CostTableEnabled

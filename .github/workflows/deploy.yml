@@ -38,7 +38,7 @@ jobs:
           python-version: '3.12'
 
       - name: Validate Python syntax
-        run: python -m py_compile lambda/lambda_function.py lambda/ingest.py
+        run: python -m py_compile lambda/lambda_function.py lambda/ingest.py lambda/provider/__init__.py lambda/provider/github.py lambda/provider/gitlab.py lambda/provider/factory.py
 
       - name: Install cfn-lint
         run: pip install cfn-lint
@@ -73,4 +73,14 @@ jobs:
             --stack-name "$STACK_NAME" \
             --github-token "${{ secrets.GH_TOKEN_PAT }}" \
             --webhook-secret "${{ secrets.GH_WEBHOOK_SECRET }}" \
-            --model "${{ vars.BEDROCK_MODEL_ID }}"
+            --gitlab-token "${{ secrets.GL_TOKEN }}" \
+            --gitlab-webhook-secret "${{ secrets.GL_WEBHOOK_SECRET }}" \
+            --gitlab-api-url "${{ vars.GITLAB_API_URL }}" \
+            --model "${{ vars.BEDROCK_MODEL_ID }}" \
+            --cost-table-name "${{ vars.COST_TABLE_NAME }}"
+        env:
+          # Allow optional secrets to be empty without failing
+          GH_TOKEN_PAT: ${{ secrets.GH_TOKEN_PAT }}
+          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          GL_TOKEN: ${{ secrets.GL_TOKEN }}
+          GL_WEBHOOK_SECRET: ${{ secrets.GL_WEBHOOK_SECRET }}

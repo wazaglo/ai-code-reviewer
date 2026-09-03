@@ -23,6 +23,10 @@
 #   --allowlist "org/repo,..." Repo allowlist (default: allow all)
 #   --budget N                Monthly USD budget alarm (default 50)
 #   --notify-email EMAIL      Email for cost/budget alerts (default: none)
+#   --gitlab-token TOKEN      GitLab PAT (api scope)
+#   --gitlab-webhook-secret   GitLab webhook secret token
+#   --gitlab-api-url URL      GitLab API base URL (default: https://gitlab.com/api/v4)
+#   --cost-table-name NAME    DynamoDB cost attribution table name (default: PR-Review-CostAttribution)
 #   --no-package              Skip packaging/upload; assume artifacts already in place
 #   --dry-run                 Print the deploy command and exit without running
 #
@@ -35,6 +39,9 @@ REGION="us-east-1"
 STACK_NAME="pr-reviewer"
 GITHUB_TOKEN=""
 WEBHOOK_SECRET=""
+GITLAB_TOKEN=""
+GITLAB_WEBHOOK_SECRET=""
+GITLAB_API_URL="https://gitlab.com/api/v4"
 CODE_BUCKET=""
 RATE_LIMIT="10"
 BURST_LIMIT="20"
@@ -43,6 +50,7 @@ MAX_RECEIVE_COUNT="5"
 ALLOWLIST=""
 BUDGET="50"
 NOTIFY_EMAIL=""
+COST_TABLE_NAME="PR-Review-CostAttribution"
 DO_PACKAGE=1
 DRY_RUN=0
 
@@ -60,23 +68,27 @@ TEMPLATE_FILE="${ROOT_DIR}/cloudformation/template.yaml"
 # ----------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --region)            REGION="$2"; shift 2 ;;
-    --stack-name)        STACK_NAME="$2"; shift 2 ;;
-    --github-token)      GITHUB_TOKEN="$2"; shift 2 ;;
-    --webhook-secret)    WEBHOOK_SECRET="$2"; shift 2 ;;
-    --model)             MODEL="$2"; shift 2 ;;
-    --code-bucket)       CODE_BUCKET="$2"; shift 2 ;;
-    --rate-limit)        RATE_LIMIT="$2"; shift 2 ;;
-    --burst-limit)       BURST_LIMIT="$2"; shift 2 ;;
-    --waf-limit)         WAF_LIMIT="$2"; shift 2 ;;
-    --max-receive-count) MAX_RECEIVE_COUNT="$2"; shift 2 ;;
-    --allowlist)         ALLOWLIST="$2"; shift 2 ;;
-    --budget)            BUDGET="$2"; shift 2 ;;
-    --notify-email)      NOTIFY_EMAIL="$2"; shift 2 ;;
-    --no-package)        DO_PACKAGE=0; shift ;;
-    --dry-run)           DRY_RUN=1; shift ;;
-    -h|--help)           sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *)                   echo "Unknown option: $1" >&2; exit 1 ;;
+    --region)               REGION="$2"; shift 2 ;;
+    --stack-name)           STACK_NAME="$2"; shift 2 ;;
+    --github-token)         GITHUB_TOKEN="$2"; shift 2 ;;
+    --webhook-secret)       WEBHOOK_SECRET="$2"; shift 2 ;;
+    --gitlab-token)         GITLAB_TOKEN="$2"; shift 2 ;;
+    --gitlab-webhook-secret) GITLAB_WEBHOOK_SECRET="$2"; shift 2 ;;
+    --gitlab-api-url)       GITLAB_API_URL="$2"; shift 2 ;;
+    --model)                MODEL="$2"; shift 2 ;;
+    --code-bucket)          CODE_BUCKET="$2"; shift 2 ;;
+    --rate-limit)           RATE_LIMIT="$2"; shift 2 ;;
+    --burst-limit)          BURST_LIMIT="$2"; shift 2 ;;
+    --waf-limit)            WAF_LIMIT="$2"; shift 2 ;;
+    --max-receive-count)    MAX_RECEIVE_COUNT="$2"; shift 2 ;;
+    --allowlist)            ALLOWLIST="$2"; shift 2 ;;
+    --budget)               BUDGET="$2"; shift 2 ;;
+    --notify-email)         NOTIFY_EMAIL="$2"; shift 2 ;;
+    --cost-table-name)      COST_TABLE_NAME="$2"; shift 2 ;;
+    --no-package)           DO_PACKAGE=0; shift ;;
+    --dry-run)              DRY_RUN=1; shift ;;
+    -h|--help)              sed -n '2,33p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *)                      echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
@@ -84,10 +96,12 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text --region
 CODE_BUCKET="${CODE_BUCKET:-${STACK_NAME}-artifacts-${ACCOUNT_ID}}"
 KEY_PREFIX="pr-reviewer"
 
-echo "==> Region:      ${REGION}"
-echo "==> Stack:       ${STACK_NAME}"
-echo "==> Model:       ${MODEL}"
-echo "==> Code bucket: s3://${CODE_BUCKET}"
+echo "==> Region:           ${REGION}"
+echo "==> Stack:            ${STACK_NAME}"
+echo "==> Model:            ${MODEL}"
+echo "==> Code bucket:      s3://${CODE_BUCKET}"
+echo "==> GitHub enabled:   $( [[ -n "$GITHUB_TOKEN" ]] && echo yes || echo no )"
+echo "==> GitLab enabled:   $( [[ -n "$GITLAB_TOKEN" ]] && echo yes || echo no )"
 
 # ----------------------------------------------------------------------
 # 1. Package Lambda code + requests layer -> S3
@@ -99,7 +113,9 @@ if [[ "${DO_PACKAGE}" == "1" ]]; then
   echo "==> Packaging Lambda code..."
   cp "${LAMBDA_FILE}" "${TMPDIR}/lambda_function.py"
   cp "${INGEST_FILE}" "${TMPDIR}/ingest.py"
-  ( cd "${TMPDIR}" && zip -q -r lambda_function.zip lambda_function.py )
+  # Copy provider module
+  cp -r "${ROOT_DIR}/lambda/provider" "${TMPDIR}/provider"
+  ( cd "${TMPDIR}" && zip -q -r lambda_function.zip lambda_function.py provider )
   ( cd "${TMPDIR}" && zip -q -r ingest.zip ingest.py )
 
   echo "==> Building 'requests' layer..."
@@ -145,7 +161,11 @@ DEPLOY_ARGS=(
       MonthlyBudgetLimit="$BUDGET" \
       NotificationEmail="$NOTIFY_EMAIL" \
       GitHubWebhookSecret="$WEBHOOK_SECRET" \
-      GitHubToken="$GITHUB_TOKEN"
+      GitHubToken="$GITHUB_TOKEN" \
+      GitLabWebhookSecret="$GITLAB_WEBHOOK_SECRET" \
+      GitLabToken="$GITLAB_TOKEN" \
+      GitLabApiUrl="$GITLAB_API_URL" \
+      CostTableName="$COST_TABLE_NAME"
 )
 
 if [[ "${DRY_RUN}" == "1" ]]; then
@@ -164,4 +184,4 @@ aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs' \
   --output table
 
-echo "==> Done. Register the WebhookUrl output as your GitHub webhook."
+echo "==> Done. Register the WebhookUrl output as your GitHub/GitLab webhook."
