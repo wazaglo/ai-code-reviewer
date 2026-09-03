@@ -8,19 +8,7 @@ No waiting for human reviewers. No scaling worries. Deploy once, connect any rep
 
 ## Architecture
 
-```
-                    ┌────────────────┐    ┌──────────┐    ┌─────────────────┐
-  GitHub webhook ──►│  Ingest Lambda │──►│   SQS    │──►│   Worker Lambda  │
-  (POST /webhook)   │ verifies HMAC  │    │ + DLQ    │   │ clone -> Bedrock │
-       │            └────────────────┘    └──────────┘   │ -> post comment │
-       │  ┌───────────┐   ┌───────────┐                  └─────────────────┘
-       └─►│ WAF       │──►│ API GW    │                        │
-          │ rate rule │   │ throttling│                        │
-          └───────────┘   └───────────┘                        ▼
-                                                    ┌─────────────────┐
-                                                    │   Bedrock Nova   │
-                                                    └─────────────────┘
-```
+![AI Code Reviewer architecture](docs/architecture.png)
 
 ### Flow
 
@@ -45,6 +33,8 @@ No waiting for human reviewers. No scaling worries. Deploy once, connect any rep
 │   └── deploy.sh                    # Packages code -> uploads to S3 -> deploys stack
 ├── config/
 │   └── model_config.yaml            # Where you choose the Bedrock model
+├── docs/
+│   └── architecture.py              # Regenerates architecture.png/.svg (official AWS icons)
 ├── .github/workflows/deploy.yml     # CI/CD: lint + auto-deploy on push to main
 └── README.md
 ```
