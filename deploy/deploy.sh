@@ -35,7 +35,6 @@ REGION="us-east-1"
 STACK_NAME="pr-reviewer"
 GITHUB_TOKEN=""
 WEBHOOK_SECRET=""
-MODEL="amazon.nova-2-lite-v1:0"
 CODE_BUCKET=""
 RATE_LIMIT="10"
 BURST_LIMIT="20"
@@ -51,6 +50,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LAMBDA_FILE="${ROOT_DIR}/lambda/lambda_function.py"
 INGEST_FILE="${ROOT_DIR}/lambda/ingest.py"
+
+# Default model comes from config/model_config.yaml, the single source of truth.
+MODEL="$(sed -n 's/^[[:space:]]*BEDROCK_MODEL_ID:[[:space:]]*//p' "${ROOT_DIR}/config/model_config.yaml" | head -1)"
 TEMPLATE_FILE="${ROOT_DIR}/cloudformation/template.yaml"
 
 # ----------------------------------------------------------------------

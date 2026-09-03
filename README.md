@@ -146,7 +146,7 @@ chmod +x deploy/deploy.sh
 | `--stack-name` | `pr-reviewer` | CloudFormation stack name |
 | `--github-token` | (none) | GitHub PAT (private repos) |
 | `--webhook-secret` | (none) | GitHub webhook secret for HMAC verification |
-| `--model` | `amazon.nova-2-lite-v1:0` | Bedrock model ID |
+| `--model` | `amazon.nova-lite-v1:0` (read from `config/model_config.yaml`) | Bedrock model ID |
 | `--code-bucket` | auto-created | S3 bucket for packaged artifacts |
 | `--rate-limit` | `10` | API requests/second |
 | `--burst-limit` | `20` | API concurrent burst |

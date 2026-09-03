@@ -13,11 +13,11 @@
 
 # Model ID as passed to the Bedrock Converse API (modelId arg).
 # Full catalogue: https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
-BEDROCK_MODEL_ID: amazon.nova-2-lite-v1:0
+BEDROCK_MODEL_ID: amazon.nova-lite-v1:0
 
 # The associated foundation-model ARN (granted in IAM, not used at runtime).
 # Format: arn:aws:bedrock:<region>::foundation-model/<ModelId>
-BEDROCK_MODEL_ARN: arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-2-lite-v1:0
+BEDROCK_MODEL_ARN: arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0
 
 # ------------------------------------------------------------------------------
 # Available Nova models (choose the trade-off you want):
