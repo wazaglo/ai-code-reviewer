@@ -12,25 +12,7 @@ No waiting for human reviewers. No scaling worries. Deploy once, connect any rep
 
 ## Architecture
 
-```
-                     ┌────────────────┐    ┌──────────┐    ┌─────────────────┐
-   GitHub/GitLab     │  Ingest Lambda │───►│   SQS    │───►│   Worker Lambda  │
-   webhook (POST)    │ detects provider│    │ + DLQ    │   │ fetch diffs      │
-        │            │ verifies HMAC   │    └──────────┘   │ Bedrock Nova    │
-        │            └────────────────┘                   │ post comment    │
-        │  ┌───────────┐   ┌───────────┐                  └────────┬────────┘
-        └─►│ WAF       │──►│ API GW    │                           │
-           │ rate rule │   │ throttling│                           ▼
-           └───────────┘   └───────────┘                  ┌─────────────────┐
-                                                          │   Bedrock Nova   │
-                                                          └─────────────────┘
-                                                                    │
-                                                                    ▼
-                                                          ┌─────────────────┐
-                                                          │ DynamoDB Cost   │
-                                                          │ Attribution      │
-                                                          └─────────────────┘
-```
+![AI Code Reviewer architecture](docs/architecture.png)
 
 ### Flow
 

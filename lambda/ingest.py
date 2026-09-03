@@ -12,6 +12,7 @@ It:
 """
 import json
 import os
+import base64
 
 import boto3
 
@@ -60,6 +61,22 @@ def handler(event, context):
         body = body.encode('utf-8')
 
     headers = event.get('headers', {})
+    # Basic auth enforcement (if configured).
+    WEBHOOK_USER = os.environ.get('WEBHOOK_USER', '')
+    WEBHOOK_PASS = os.environ.get('WEBHOOK_PASS', '')
+    auth_header = headers.get('Authorization', '')
+    if WEBHOOK_USER and WEBHOOK_PASS:
+        # GitHub webhook is exempted (it does not send Basic auth).
+        if not headers.get('User-Agent', '').startswith('GitHub'):
+            expected = base64.b64encode(f'{WEBHOOK_USER}:{WEBHOOK_PASS}'.encode()).decode()
+            if auth_header != f'Basic {expected}':
+                print(json.dumps({'event': 'AUTH_FAILED', 'status': 401}))
+                return {
+                    'statusCode': 401,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({'error': 'Unauthorized'}),
+                }
+
     payload = {}
     try:
         payload = json.loads(body)
