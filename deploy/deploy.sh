@@ -2,23 +2,29 @@
 #
 # deploy.sh - one-shot deployment of the AI Code Reviewer stack.
 #
-# Packages the Lambda code + `requests` layer, uploads them to S3, and deploys
-# the CloudFormation stack. Model selection and throttling are configurable.
+# Packages the two Lambda functions + the `requests` layer, uploads them to S3,
+# and deploys the CloudFormation stack. Model selection, rate limits, secrets
+# and repo allowlist are all configurable.
 #
 # Usage:
 #   ./deploy/deploy.sh \
 #       --region us-east-1 \
 #       --stack-name pr-reviewer \
 #       --github-token 'ghp_...' \
+#       --webhook-secret 'my-github-webhook-secret' \
 #       --model amazon.nova-lite-v1:0
 #
 # Optional flags:
-#   --code-bucket NAME    Reuse an existing S3 bucket (default: <stack>-artifacts-<account>)
-#   --rate-limit N        API requests/second (default 10)
-#   --burst-limit N       API concurrent burst  (default 20)
-#   --waf-limit N         WAF requests/IP/5min  (default 200)
-#   --no-package          Skip packaging/upload; assume artifacts already in place
-#   --dry-run             Print the deploy command and exit without running
+#   --code-bucket NAME        Reuse an existing S3 bucket (default: <stack>-artifacts-<account>)
+#   --rate-limit N            API requests/second (default 10)
+#   --burst-limit N           API concurrent burst  (default 20)
+#   --waf-limit N             WAF requests/IP/5min  (default 200)
+#   --max-receive-count N     SQS retries before DLQ (default 5)
+#   --allowlist "org/repo,..." Repo allowlist (default: allow all)
+#   --budget N                Monthly USD budget alarm (default 50)
+#   --notify-email EMAIL      Email for cost/budget alerts (default: none)
+#   --no-package              Skip packaging/upload; assume artifacts already in place
+#   --dry-run                 Print the deploy command and exit without running
 #
 set -euo pipefail
 
@@ -28,17 +34,23 @@ set -euo pipefail
 REGION="us-east-1"
 STACK_NAME="pr-reviewer"
 GITHUB_TOKEN=""
+WEBHOOK_SECRET=""
 MODEL="amazon.nova-2-lite-v1:0"
 CODE_BUCKET=""
 RATE_LIMIT="10"
 BURST_LIMIT="20"
 WAF_LIMIT="200"
+MAX_RECEIVE_COUNT="5"
+ALLOWLIST=""
+BUDGET="50"
+NOTIFY_EMAIL=""
 DO_PACKAGE=1
 DRY_RUN=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LAMBDA_FILE="${ROOT_DIR}/lambda/lambda_function.py"
+INGEST_FILE="${ROOT_DIR}/lambda/ingest.py"
 TEMPLATE_FILE="${ROOT_DIR}/cloudformation/template.yaml"
 
 # ----------------------------------------------------------------------
@@ -46,18 +58,23 @@ TEMPLATE_FILE="${ROOT_DIR}/cloudformation/template.yaml"
 # ----------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --region)       REGION="$2"; shift 2 ;;
-    --stack-name)   STACK_NAME="$2"; shift 2 ;;
-    --github-token) GITHUB_TOKEN="$2"; shift 2 ;;
-    --model)        MODEL="$2"; shift 2 ;;
-    --code-bucket)  CODE_BUCKET="$2"; shift 2 ;;
-    --rate-limit)   RATE_LIMIT="$2"; shift 2 ;;
-    --burst-limit)  BURST_LIMIT="$2"; shift 2 ;;
-    --waf-limit)    WAF_LIMIT="$2"; shift 2 ;;
-    --no-package)   DO_PACKAGE=0; shift ;;
-    --dry-run)      DRY_RUN=1; shift ;;
-    -h|--help)      sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *)              echo "Unknown option: $1" >&2; exit 1 ;;
+    --region)            REGION="$2"; shift 2 ;;
+    --stack-name)        STACK_NAME="$2"; shift 2 ;;
+    --github-token)      GITHUB_TOKEN="$2"; shift 2 ;;
+    --webhook-secret)    WEBHOOK_SECRET="$2"; shift 2 ;;
+    --model)             MODEL="$2"; shift 2 ;;
+    --code-bucket)       CODE_BUCKET="$2"; shift 2 ;;
+    --rate-limit)        RATE_LIMIT="$2"; shift 2 ;;
+    --burst-limit)       BURST_LIMIT="$2"; shift 2 ;;
+    --waf-limit)         WAF_LIMIT="$2"; shift 2 ;;
+    --max-receive-count) MAX_RECEIVE_COUNT="$2"; shift 2 ;;
+    --allowlist)         ALLOWLIST="$2"; shift 2 ;;
+    --budget)            BUDGET="$2"; shift 2 ;;
+    --notify-email)      NOTIFY_EMAIL="$2"; shift 2 ;;
+    --no-package)        DO_PACKAGE=0; shift ;;
+    --dry-run)           DRY_RUN=1; shift ;;
+    -h|--help)           sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *)                   echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
@@ -79,7 +96,9 @@ if [[ "${DO_PACKAGE}" == "1" ]]; then
 
   echo "==> Packaging Lambda code..."
   cp "${LAMBDA_FILE}" "${TMPDIR}/lambda_function.py"
+  cp "${INGEST_FILE}" "${TMPDIR}/ingest.py"
   ( cd "${TMPDIR}" && zip -q -r lambda_function.zip lambda_function.py )
+  ( cd "${TMPDIR}" && zip -q -r ingest.zip ingest.py )
 
   echo "==> Building 'requests' layer..."
   mkdir -p "${TMPDIR}/layer/python"
@@ -96,6 +115,7 @@ if [[ "${DO_PACKAGE}" == "1" ]]; then
 
   echo "==> Uploading artifacts..."
   aws s3 cp "${TMPDIR}/lambda_function.zip"  "s3://${CODE_BUCKET}/${KEY_PREFIX}/lambda_function.zip"  --region "$REGION" --quiet
+  aws s3 cp "${TMPDIR}/ingest.zip"           "s3://${CODE_BUCKET}/${KEY_PREFIX}/ingest.zip"           --region "$REGION" --quiet
   aws s3 cp "${TMPDIR}/requests-layer.zip"   "s3://${CODE_BUCKET}/${KEY_PREFIX}/requests-layer.zip"   --region "$REGION" --quiet
 fi
 
@@ -114,6 +134,11 @@ DEPLOY_ARGS=(
       ApiStageRateLimit="$RATE_LIMIT" \
       ApiStageBurstLimit="$BURST_LIMIT" \
       WafRateLimit="$WAF_LIMIT" \
+      MaxReceiveCount="$MAX_RECEIVE_COUNT" \
+      RepoAllowlist="$ALLOWLIST" \
+      MonthlyBudgetLimit="$BUDGET" \
+      NotificationEmail="$NOTIFY_EMAIL" \
+      GitHubWebhookSecret="$WEBHOOK_SECRET" \
       GitHubToken="$GITHUB_TOKEN"
 )
 

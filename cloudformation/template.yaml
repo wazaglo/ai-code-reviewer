@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  AI Code Reviewer - Automated pull-request analysis using Amazon Bedrock (Nova).
-  Deploys a fully-managed, rate-limited pipeline: API Gateway (webhook) -> SQS ->
-  Lambda (review worker) -> Bedrock. WAF + stage throttling protect your token spend.
+  AI Code Reviewer - production-hardened automated PR review on Amazon Bedrock.
+  API Gateway (webhook, signature-verified) -> Ingest Lambda -> SQS (+DLQ) ->
+  Worker Lambda -> Bedrock Nova -> GitHub comment. Secrets in AWS Secrets
+  Manager, X-Ray tracing, CloudWatch alarms, WAF + stage throttling for cost guard.
 
 Parameters:
   # ------------------------------------------------------------------
@@ -28,7 +29,12 @@ Parameters:
   LambdaFunctionName:
     Type: String
     Default: PR-Review-Worker
-    Description: Lambda function that processes queued pull requests.
+    Description: Worker Lambda that processes queued pull requests.
+
+  IngestFunctionName:
+    Type: String
+    Default: PR-Review-Ingest
+    Description: Ingest/verifier Lambda behind the webhook.
 
   ApiName:
     Type: String
@@ -43,9 +49,26 @@ Parameters:
     Default: 'amazon.nova-2-lite-v1:0'
     AllowedPattern: '.+'
     Description: >
-      The Bedrock foundation-model ID used for AI code analysis.
-      Change this value to switch models (e.g. amazon.nova-pro-v1:0).
-      The IAM policy and the Lambda runtime BOTH derive from this single field.
+      Bedrock foundation-model ID used for AI analysis. Change to switch models;
+      the IAM permission ARN and the runtime BOTH derive from this field.
+
+  # ------------------------------------------------------------------
+  # Secrets (never logged / echoed)
+  # ------------------------------------------------------------------
+  GitHubWebhookSecret:
+    Type: String
+    NoEcho: true
+    Description: >
+      The secret you configure against your GitHub webhook. Used to verify the
+      X-Hub-Signature-256 on every request so only GitHub can trigger reviews.
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: >
+      GitHub Personal Access Token (fine-grained, contents:read +
+      pull_requests:write) used to clone and post comments. Leave empty for
+      public-repo dry runs.
 
   # ------------------------------------------------------------------
   # Compute sizing
@@ -66,50 +89,73 @@ Parameters:
     Type: Number
     Default: 360
     MinValue: 30
-    Description: SQS visibility timeout in seconds (must be >= Lambda timeout).
+    Description: SQS visibility timeout (must be >= Lambda timeout).
+
+  # DLQ: number of delivery attempts before a message is redriven to the DLQ.
+  MaxReceiveCount:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 1000
+
+  # Comma-separated org/repo allowlist. Default empty = allow anything.
+  RepoAllowlist:
+    Type: String
+    Default: ''
+    Description: 'Comma-separated list of allowed org/repo, e.g. acme/web,acme/app. Empty allows all.'
 
   # ------------------------------------------------------------------
-  # Rate limiting / throttling
+  # Rate limiting / cost protection
   # ------------------------------------------------------------------
   ApiStageRateLimit:
     Type: Number
     Default: 10
     MinValue: 0
-    Description: Requests per second allowed at the API stage (0 = unlimited).
+    Description: Requests per second at the API stage (0 = unlimited).
 
   ApiStageBurstLimit:
     Type: Number
     Default: 20
     MinValue: 0
-    Description: Concurrent request burst allowed at the API stage (0 = unlimited).
 
   WafRateLimit:
     Type: Number
     Default: 200
     MinValue: 100
     MaxValue: 2000000000
-    Description: >
-      AWS WAF rule limit - max requests from a single client IP within 5 minutes.
-      Raised limits and existing CAs are auto-exempted. Protects the endpoint
-      even if the webhook URL leaks.
+    Description: WAF rule limit - max requests from a single IP within 5 minutes.
 
-  # ------------------------------------------------------------------
-  # Secrets
-  # ------------------------------------------------------------------
-  GitHubToken:
+  MonthlyBudgetLimit:
+    Type: Number
+    Default: 50
+    Description: Monthly AWS spend budget limit in USD that triggers an alarm.
+
+  NotificationEmail:
     Type: String
-    NoEcho: true
-    Description: >
-      GitHub Personal Access Token (scope: repo) to clone private repos and post
-      comments. Leave empty for public repos / dry-run.
+    Default: ''
+    Description: Email that receives cost/spend budget and alarm notifications.
 
 Conditions:
-  UseGitHubToken: !Not [ !Equals [ !Ref GitHubToken, '' ] ]
-  EnableStageLimit: !Not [ !Equals [ !Ref ApiStageRateLimit, 0 ] ]
+  NotifyEnabled: !Not [ !Equals [ !Ref NotificationEmail, '' ] ]
 
 Resources:
   # ==================================================================
-  # SQS - decouples webhook receipt from async processing
+  # Secrets Manager - never store tokens in env vars or code
+  # ==================================================================
+  WebhookSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: GitHub webhook HMAC secret used to verify webhook signatures
+      SecretString: !Ref GitHubWebhookSecret
+
+  GitHubTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: GitHub PAT used to clone repos and post PR comments
+      SecretString: !Ref GitHubToken
+
+  # ==================================================================
+  # SQS - main review queue + dead-letter queue
   # ==================================================================
   ReviewQueue:
     Type: AWS::SQS::Queue
@@ -117,9 +163,68 @@ Resources:
       QueueName: !Ref QueueName
       VisibilityTimeout: !Ref VisibilityTimeout
       MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReviewQueueDLQ.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+
+  ReviewQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${QueueName}-dlq'
+      MessageRetentionPeriod: 1209600
 
   # ==================================================================
-  # IAM - Lambda execution role
+  # IAM - ingest Lambda role (verify + enqueue)
+  # ==================================================================
+  IngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+
+  IngestRolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: PRReview-Ingest
+      Roles: [!Ref IngestRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt ReviewQueue.Arn
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Effect: Allow
+            Action:
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+            Resource: '*'
+
+  # Separate policy ONLY when a webhook secret is configured (avoids an
+  # empty Resource on the conditional secrets statement).
+  IngestSecretPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: PRReview-Ingest-Secret
+      Roles: [!Ref IngestRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref WebhookSecret
+
+  # ==================================================================
+  # IAM - worker Lambda role (read + analyze + post)
   # ==================================================================
   WorkerRole:
     Type: AWS::IAM::Role
@@ -128,16 +233,14 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
+            Principal: { Service: lambda.amazonaws.com }
             Action: sts:AssumeRole
 
-  WorkerRoleSQS:
+  WorkerRolePolicies:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: PRReview-SQS-Access
-      Roles:
-        - !Ref WorkerRole
+      PolicyName: PRReview-Worker
+      Roles: [!Ref WorkerRole]
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -147,37 +250,23 @@ Resources:
               - sqs:GetQueueAttributes
               - sqs:ReceiveMessage
             Resource: !GetAtt ReviewQueue.Arn
-
-  WorkerRoleBedrock:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: PRReview-Bedrock-Access
-      Roles:
-        - !Ref WorkerRole
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GitHubTokenSecret
           - Effect: Allow
             Action: bedrock:InvokeModel
-            # Scoped to the exact model selected via BedrockModelId.
-            Resource:
-              - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
-
-  WorkerRoleLogs:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: PRReview-CloudWatch-Logs
-      Roles:
-        - !Ref WorkerRole
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
+            Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
           - Effect: Allow
             Action:
               - logs:CreateLogGroup
               - logs:CreateLogStream
               - logs:PutLogEvents
             Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Effect: Allow
+            Action:
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+            Resource: '*'
 
   # ==================================================================
   # Lambda layer - bundles the `requests` dependency
@@ -194,14 +283,45 @@ Resources:
         - python3.12
 
   # ==================================================================
-  # Lambda - the PR review worker
+  # Lambda - ingest / verifier (webhook proxy)
+  # ==================================================================
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - IngestRolePolicies
+      - IngestSecretPolicy
+    Properties:
+      FunctionName: !Ref IngestFunctionName
+      Role: !GetAtt IngestRole.Arn
+      Runtime: python3.12
+      Handler: ingest.handler
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Sub '${CodeKeyPrefix}/ingest.zip'
+      Timeout: 30
+      MemorySize: 128
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref ReviewQueue
+          WEBSECRET_ARN: !Ref WebhookSecret
+
+  # Allow API Gateway to invoke the ingest function from the webhook method.
+  IngestInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IngestFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReviewApi}/*/POST/webhook'
+
+  # ==================================================================
+  # Lambda - review worker (SQS consumer)
   # ==================================================================
   WorkerFunction:
     Type: AWS::Lambda::Function
-    DependsOn:
-      - WorkerRoleSQS
-      - WorkerRoleBedrock
-      - WorkerRoleLogs
+    DependsOn: WorkerRolePolicies
     Properties:
       FunctionName: !Ref LambdaFunctionName
       Role: !GetAtt WorkerRole.Arn
@@ -212,16 +332,17 @@ Resources:
         S3Key: !Sub '${CodeKeyPrefix}/lambda_function.zip'
       Timeout: !Ref LambdaTimeout
       MemorySize: !Ref MemorySize
+      TracingConfig:
+        Mode: Active
+      Layers: [!Ref RequestsLayer]
       Environment:
         Variables:
           QUEUE_URL: !Ref ReviewQueue
-          # Single-source-of-truth model ID injected at deploy.
           BEDROCK_MODEL_ID: !Ref BedrockModelId
-          GITHUB_TOKEN: !Ref GitHubToken
-      Layers:
-        - !Ref RequestsLayer
+          GITHUB_TOKEN_ARN: !Ref GitHubTokenSecret
+          REPO_ALLOWLIST: !Ref RepoAllowlist
 
-  # SQS event source -> triggers the Lambda
+  # SQS event source -> triggers the worker (delivers failures to the DLQ)
   WorkerEventSource:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
@@ -231,43 +352,15 @@ Resources:
       Enabled: true
 
   # ==================================================================
-  # IAM - API Gateway role to send messages to SQS
-  # ==================================================================
-  ApiGatewayRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: apigateway.amazonaws.com
-            Action: sts:AssumeRole
-
-  ApiGatewaySQSPolicy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: APIGateway-SQS-SendMessage
-      Roles:
-        - !Ref ApiGatewayRole
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action: sqs:SendMessage
-            Resource: !GetAtt ReviewQueue.Arn
-
-  # ==================================================================
-  # API Gateway - public webhook endpoint
+  # API Gateway - public webhook endpoint (Lambda proxy)
   # ==================================================================
   ReviewApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
       Name: !Ref ApiName
-      Description: Public webhook endpoint that buffers events into SQS
+      Description: Signature-verified webhook endpoint that buffers events into SQS
       EndpointConfiguration:
-        Types:
-          - REGIONAL
+        Types: [REGIONAL]
 
   WebhookResource:
     Type: AWS::ApiGateway::Resource
@@ -276,20 +369,42 @@ Resources:
       ParentId: !GetAtt ReviewApi.RootResourceId
       PathPart: webhook
 
-  # WAF WebACL association (rate-based, IP-scoped) - enabled on the prod stage
+  WebhookMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ReviewApi
+      ResourceId: !Ref WebhookResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${IngestFunction.Arn}/invocations'
+        PassthroughBehavior: WHEN_NO_MATCH
+      MethodResponses:
+        - StatusCode: '200'
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: WebhookMethod
+    Properties:
+      RestApiId: !Ref ReviewApi
+      StageName: prod
+
+  # ==================================================================
+  # WAF - rate-based rule (abuse / leaked-URL protection)
+  # ==================================================================
   WebAcl:
     Type: AWS::WAFv2::WebACL
     Properties:
       Name: !Sub '${ApiName}-waf-webacl'
       Description: Rate-based rule protecting the PR review webhook from abuse
       Scope: REGIONAL
-      DefaultAction:
-        Allow: {}
+      DefaultAction: { Allow: {} }
       Rules:
         - Name: RateLimitRule
           Priority: 1
-          Action:
-            Block: {}
+          Action: { Block: {} }
           Statement:
             RateBasedStatement:
               Limit: !Ref WafRateLimit
@@ -309,45 +424,7 @@ Resources:
       ResourceArn: !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis/${ReviewApi}/stages/prod'
       WebACLArn: !GetAtt WebAcl.Arn
 
-  WebhookMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref ReviewApi
-      ResourceId: !Ref WebhookResource
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS
-        IntegrationHttpMethod: POST
-        Credentials: !GetAtt ApiGatewayRole.Arn
-        Uri: !Sub >-
-          arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/${QueueName}
-        PassthroughBehavior: NEVER
-        RequestParameters:
-          integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
-        RequestTemplates:
-          application/json: Action=SendMessage&MessageBody=$util.urlEncode($input.body)
-        IntegrationResponses:
-          - StatusCode: '200'
-            ResponseTemplates:
-              text/xml: '{"message":"Webhook received and queued"}'
-              application/xml: '{"message":"Webhook received and queued"}'
-              application/json: '{"message":"Webhook received and queued"}'
-              application/octet-stream: '{"message":"Webhook received and queued"}'
-      MethodResponses:
-        - StatusCode: '200'
-          ResponseModels:
-            application/json: Empty
-
-  ApiDeployment:
-    Type: AWS::ApiGateway::Deployment
-    DependsOn:
-      - WebhookMethod
-    Properties:
-      RestApiId: !Ref ReviewApi
-      StageName: prod
-
-  # Stage-level throttling (rate + burst) - caps total request throughput
+  # Stage-level throttling
   ProdStage:
     Type: AWS::ApiGateway::Stage
     Properties:
@@ -361,23 +438,103 @@ Resources:
           ThrottlingBurstLimit: !Ref ApiStageBurstLimit
           MetricsEnabled: true
           LoggingLevel: INFO
+          DataTraceEnabled: false
+          CachingEnabled: false
 
   # ==================================================================
-  # Outputs - the URL you register as a GitHub webhook
+  # Observability - CloudWatch alarms + Budget
   # ==================================================================
+  WorkerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${LambdaFunctionName}-errors'
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 0
+      TreatMissingData: notBreaching
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunctionName
+      Period: 300
+      Statistic: Sum
+
+  IngestErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${IngestFunctionName}-errors'
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 0
+      TreatMissingData: notBreaching
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestFunctionName
+      Period: 300
+      Statistic: Sum
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ApiName}-5xx'
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 0
+      TreatMissingData: notBreaching
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ApiName
+        - Name: Stage
+          Value: prod
+      Period: 300
+      Statistic: Sum
+
+  # Optional budget that pages on spend (configure SNS topics as needed).
+  SpendBudget:
+    Type: AWS::Budgets::Budget
+    Condition: NotifyEnabled
+    Properties:
+      Budget:
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetLimit
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref NotificationEmail
+
 Outputs:
   WebhookUrl:
-    Description: Public webhook endpoint to register in GitHub
+    Description: Register this URL as the GitHub webhook. GitHub signs every request.
     Value: !Sub 'https://${ReviewApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook'
 
   QueueUrl:
     Description: SQS queue URL
     Value: !Ref ReviewQueue
 
-  LambdaArn:
-    Description: Lambda function ARN
+  DlqUrl:
+    Description: Dead-letter queue URL (poison messages land here)
+    Value: !Ref ReviewQueueDLQ
+
+  WorkerLambdaArn:
+    Description: Worker Lambda ARN
     Value: !GetAtt WorkerFunction.Arn
 
+  IngestLambdaArn:
+    Description: Ingest Lambda ARN
+    Value: !GetAtt IngestFunction.Arn
+
   ModelId:
-    Description: The Bedrock model currently in use
+    Description: Bedrock model currently in use
     Value: !Ref BedrockModelId

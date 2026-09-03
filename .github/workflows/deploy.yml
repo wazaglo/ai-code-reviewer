@@ -1,0 +1,76 @@
+name: Deploy PR Reviewer
+
+# Deploys the AI Code Reviewer stack on every push to main (and on manual
+# trigger). Wraps ./deploy/deploy.sh so infrastructure and Lambda changes are
+# released reproducibly from CI rather than a developer's machine.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lambda/**'
+      - 'cloudformation/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Prints the deploy command instead of running it'
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: pr-reviewer
+
+jobs:
+  lint:
+    name: Lint Lambda + template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate Python syntax
+        run: python -m py_compile lambda/lambda_function.py lambda/ingest.py
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: Lint CloudFormation
+        run: cfn-lint cloudformation/template.yaml
+
+  deploy:
+    name: Deploy stack
+    runs-on: ubuntu-latest
+    needs: lint
+    if: github.ref == 'refs/heads/main'
+    concurrency: pr-reviewer-deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 1200
+
+      - name: Deploy
+        run: |
+          chmod +x deploy/deploy.sh
+          ./deploy/deploy.sh \
+            --region "$AWS_REGION" \
+            --stack-name "$STACK_NAME" \
+            --github-token "${{ secrets.GITHUB_TOKEN_PAT }}" \
+            --webhook-secret "${{ secrets.GITHUB_WEBHOOK_SECRET }}" \
+            --model "${{ vars.BEDROCK_MODEL_ID }}"
