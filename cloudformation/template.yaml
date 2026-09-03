@@ -37,6 +37,13 @@ Parameters:
     Default: PR-Review-Ingest
     Description: Ingest/verifier Lambda behind the webhook.
 
+  AuthorizerFunctionName:
+    Type: String
+    Default: PR-Review-Authorizer
+    Description: >
+      Cognito Bearer-token authorizer Lambda. Direct API callers need a valid
+      token; Git-provider webhooks are exempted by User-Agent.
+
   ApiName:
     Type: String
     Default: PR-Reviewer-API
@@ -421,6 +428,7 @@ Resources:
       Code:
         S3Bucket: !Ref CodeBucket
         S3Key: !Sub '${CodeKeyPrefix}/ingest.zip'
+      Layers: [!Ref RequestsLayer]
       Timeout: 30
       MemorySize: 128
       TracingConfig:
@@ -469,6 +477,9 @@ Resources:
           GITLAB_API_URL: !Ref GitLabApiUrl
           REPO_ALLOWLIST: !Ref RepoAllowlist
           COST_TABLE_NAME: !If [CostTableEnabled, !Ref CostTableName, '']
+          MERGE_ON_LOW_SEVERITY: 'true'
+          MERGE_ON_MEDIUM_SEVERITY: 'false'
+          CLOSE_ON_HIGH_SEVERITY: 'true'
 
   # SQS event source -> triggers the worker (delivers failures to the DLQ)
   WorkerEventSource:
@@ -478,6 +489,95 @@ Resources:
       EventSourceArn: !GetAtt ReviewQueue.Arn
       BatchSize: 1
       Enabled: true
+
+  # ==================================================================
+  # Cognito - access control for direct API callers.
+  # The authorizer Lambda validates Bearer tokens against this pool;
+  # Git-provider webhooks are exempted inside the authorizer.
+  # Users are created by an admin: aws cognito-idp admin-create-user ...
+  # ==================================================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-reviewer-users'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${AWS::StackName}-api'
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  AuthorizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+
+  AuthorizerRolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: PRReview-Authorizer
+      Roles: [!Ref AuthorizerRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+  AuthorizerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: AuthorizerRolePolicies
+    Properties:
+      FunctionName: !Ref AuthorizerFunctionName
+      Role: !GetAtt AuthorizerRole.Arn
+      Runtime: python3.12
+      Handler: authorizer.handler
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Sub '${CodeKeyPrefix}/authorizer.zip'
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref CognitoUserPool
+          CLIENT_ID: !Ref CognitoUserPoolClient
+
+  AuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AuthorizerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReviewApi}/authorizers/*'
 
   # ==================================================================
   # API Gateway - public webhook endpoint (Lambda proxy)
@@ -497,13 +597,24 @@ Resources:
       ParentId: !GetAtt ReviewApi.RootResourceId
       PathPart: webhook
 
+  ApiAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      RestApiId: !Ref ReviewApi
+      Type: REQUEST
+      AuthorizerUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerFunction.Arn}/invocations'
+      IdentitySource: method.request.header.User-Agent
+      AuthorizerResultTtlInSeconds: 0
+
   WebhookMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref ReviewApi
       ResourceId: !Ref WebhookResource
       HttpMethod: POST
-      AuthorizationType: NONE
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiAuthorizer
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -511,6 +622,8 @@ Resources:
         PassthroughBehavior: WHEN_NO_MATCH
       MethodResponses:
         - StatusCode: '200'
+        - StatusCode: '401'
+        - StatusCode: '403'
 
   ApiDeployment:
     Type: AWS::ApiGateway::Deployment
@@ -604,6 +717,22 @@ Resources:
       Period: 300
       Statistic: Sum
 
+  AuthorizerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AuthorizerFunctionName}-errors'
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 0
+      TreatMissingData: notBreaching
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AuthorizerFunctionName
+      Period: 300
+      Statistic: Sum
+
   Api5xxAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -666,6 +795,18 @@ Outputs:
   ModelId:
     Description: Bedrock model currently in use
     Value: !Ref BedrockModelId
+
+  UserPoolId:
+    Description: Cognito User Pool ID (create users with admin-create-user)
+    Value: !Ref CognitoUserPool
+
+  CognitoClientId:
+    Description: Cognito App Client ID for token issuance
+    Value: !Ref CognitoUserPoolClient
+
+  AuthorizerLambdaArn:
+    Description: Cognito token authorizer Lambda ARN
+    Value: !GetAtt AuthorizerFunction.Arn
 
   CostTableName:
     Description: DynamoDB table for cost attribution
