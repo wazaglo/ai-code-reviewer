@@ -1,31 +1,7 @@
-# Model Configuration
-# ------------------------------------------------------------------------------
-# This is the single source of truth for the Amazon Bedrock model used by the
-# PR review worker. Change `BEDROCK_MODEL_ID` and redeploy to switch models.
-#
-# IMPORTANT: Any model referenced here must be enabled in your account under
-# Amazon Bedrock > Model access before the Lambda can invoke it.
-#
-# The CloudFormation stack derives BOTH of these from `BedrockModelId`:
-#   1. The IAM `bedrock:InvokeModel` permission ARN
-#   2. The runtime model ID passed to the Lambda via `BEDROCK_MODEL_ID`
-# ------------------------------------------------------------------------------
 
-# Model ID as passed to the Bedrock Converse API (modelId arg).
-# Full catalogue: https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
 BEDROCK_MODEL_ID: amazon.nova-lite-v1:0
 
 # The associated foundation-model ARN (granted in IAM, not used at runtime).
 # Format: arn:aws:bedrock:<region>::foundation-model/<ModelId>
 BEDROCK_MODEL_ARN: arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0
 
-# ------------------------------------------------------------------------------
-# Available Nova models (choose the trade-off you want):
-#
-#   amazon.nova-pro-v1:0      - Most capable / intelligent (highest cost)
-#   amazon.nova-lite-v1:0     - Balanced speed and quality (recommended default)
-#   amazon.nova-micro-v1:0    - Fastest / cheapest (good for simple reviews)
-#
-# Every Nova model is available in us-east-1 (N. Virginia).
-# Always enable model access in the Bedrock console before deploying.
-# ------------------------------------------------------------------------------
