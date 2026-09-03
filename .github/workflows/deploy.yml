@@ -71,6 +71,6 @@ jobs:
           ./deploy/deploy.sh \
             --region "$AWS_REGION" \
             --stack-name "$STACK_NAME" \
-            --github-token "${{ secrets.GITHUB_TOKEN_PAT }}" \
-            --webhook-secret "${{ secrets.GITHUB_WEBHOOK_SECRET }}" \
+            --github-token "${{ secrets.GH_TOKEN_PAT }}" \
+            --webhook-secret "${{ secrets.GH_WEBHOOK_SECRET }}" \
             --model "${{ vars.BEDROCK_MODEL_ID }}"
