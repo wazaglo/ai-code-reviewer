@@ -32,14 +32,18 @@ def _verify_token(token_str):
                 break
         if not public_key:
             return None, "Public key not found in JWKS"
-        token = jwt.decode(
+        claims = jwt.decode(
             token_str,
             key=public_key,
             algorithms=['RS256'],
-            audience=os.environ.get('CLIENT_ID', ''),
             issuer=f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{USER_POOL_ID}",
+            options={'verify_aud': False},
         )
-        return token, None
+        client_id = os.environ.get('CLIENT_ID', '')
+        token_client = claims.get('client_id') or claims.get('aud')
+        if client_id and token_client != client_id:
+            return None, "Token client_id mismatch"
+        return claims, None
     except jwt.ExpiredSignatureError:
         return None, "Token expired"
     except jwt.InvalidTokenError as e:
@@ -53,8 +57,6 @@ def handler(event, context):
     # API Gateway may lowercase headers or use different casing
     user_agent = headers.get('User-Agent', '') or headers.get('user-agent', '') or headers.get('User-Agent', '')
     token = headers.get('Authorization', '') or headers.get('authorization', '')
-
-    print(json.dumps({'event': 'HEADERS', 'headers': dict(headers), 'user_agent': user_agent, 'token_present': bool(token)}, default=str))
 
     if user_agent.startswith('GitHub'):
         print(json.dumps({'event': 'AUTH_ALLOWED', 'reason': 'GitHub webhook exemption', 'status': 200}))
