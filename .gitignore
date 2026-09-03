@@ -1,0 +1,21 @@
+# Deploy artifacts
+lambda_function.zip
+requests-layer.zip
+*.pyc
+build/
+
+# AWS / local config
+.aws/
+.env
+*.out
+
+# Secrets - never commit tokens or credentials
+*.secrets
+secrets.*
+.env.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
