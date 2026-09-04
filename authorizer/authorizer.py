@@ -51,15 +51,24 @@ def _verify_token(token_str):
     except Exception as e:
         return None, f"Verification error: {str(e)}"
 
+def _header(headers: dict, name: str) -> str:
+    lower = {k.lower(): v for k, v in headers.items() if isinstance(k, str)}
+    return lower.get(name.lower(), '') or ''
+
+
 def handler(event, context):
     method_arn = event['methodArn']
     headers = event.get('headers', {}) or {}
     # API Gateway may lowercase headers or use different casing
-    user_agent = headers.get('User-Agent', '') or headers.get('user-agent', '') or headers.get('User-Agent', '')
-    token = headers.get('Authorization', '') or headers.get('authorization', '')
+    user_agent = _header(headers, 'User-Agent')
+    token = _header(headers, 'Authorization')
 
     if user_agent.startswith('GitHub'):
         print(json.dumps({'event': 'AUTH_ALLOWED', 'reason': 'GitHub webhook exemption', 'status': 200}))
+        return generate_policy('user', 'Allow', method_arn)
+
+    if _header(headers, 'X-Gitlab-Token'):
+        print(json.dumps({'event': 'AUTH_ALLOWED', 'reason': 'GitLab webhook exemption (secret verified downstream)', 'status': 200}))
         return generate_policy('user', 'Allow', method_arn)
 
     if not token:

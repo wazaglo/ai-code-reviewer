@@ -46,3 +46,13 @@ def test_generate_policy_structure():
     assert stmt['Action'] == 'execute-api:Invoke'
     assert stmt['Effect'] == 'Allow'
     assert stmt['Resource'] == METHOD_ARN
+
+
+def test_gitlab_token_header_allowed():
+    effect, _ = _effect({'User-Agent': 'curl/8.0', 'X-Gitlab-Token': 'whsec'})
+    assert effect == 'Allow'
+
+
+def test_lowercase_gitlab_token_header_allowed():
+    effect, _ = _effect({'user-agent': 'curl/8.0', 'x-gitlab-token': 'whsec'})
+    assert effect == 'Allow'
