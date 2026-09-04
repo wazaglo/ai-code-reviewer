@@ -40,7 +40,12 @@ Webhooks from GitHub/GitLab are recognized automatically and don't need a token.
 | Secret | the value in AWS Secrets Manager (`WebhookSecret-...`) — must match |
 | Events | **Pull requests** |
 
-**GitLab:** project → Settings → Webhooks → URL above, trigger **Merge request events**, token = the GitLab secret in Secrets Manager.
+**GitLab:** project → Settings → Webhooks → URL above, trigger **Merge request events**, token = the GitLab secret in Secrets Manager. Enable **JSON body** on the hook if your GitLab version supports it (older form-encoded bodies are normalized automatically by the ingest function).
+
+> Self-hosted note: the worker calls the GitLab API (fetch diffs, comment, merge/close).
+> If your instance only resolves to a private IP, the Lambda needs a route to it
+> (VPN/DX/PrivateLink or a public egress proxy) — projects are addressed by their
+> numeric ID from the webhook payload, which works with project access tokens.
 
 Open a PR and watch the AI comment appear. That's it.
 
