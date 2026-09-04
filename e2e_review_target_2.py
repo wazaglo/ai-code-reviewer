@@ -12,3 +12,5 @@ def run_query(cursor, name):
 
 def download(url):
     return urllib.request.urlopen("http://" + url).read()
+
+# e2e #2: synchronize trigger
