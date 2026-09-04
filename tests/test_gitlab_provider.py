@@ -1,5 +1,6 @@
 """GitLab provider token verification + MR context extraction."""
 import pytest
+from provider import PRContext
 from provider.gitlab import GitLabProvider
 
 
@@ -46,3 +47,13 @@ def test_extract_mr_context_open(provider):
 
 def test_extract_mr_context_ignores_non_mr(provider):
     assert provider.extract_pr_context({'object_kind': 'push'}) is None
+
+
+def test_project_ref_prefers_numeric_id():
+    ctx = PRContext(provider='gitlab', repo='g/r', pr_number=1, token='t', project_id='641')
+    assert GitLabProvider._project_ref(ctx) == '641'
+
+
+def test_project_ref_falls_back_to_encoded_path():
+    ctx = PRContext(provider='gitlab', repo='g/r', pr_number=1, token='t')
+    assert GitLabProvider._project_ref(ctx) == 'g%2Fr'

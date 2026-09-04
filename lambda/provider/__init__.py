@@ -20,6 +20,7 @@ class PRContext:
     pr_number: int
     token: str
     api_base: str = ""
+    project_id: str = ""
 
 
 class CodeHostProvider(ABC):

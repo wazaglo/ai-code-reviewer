@@ -59,12 +59,13 @@ class GitLabProvider(CodeHostProvider):
             repo=project_path,
             pr_number=mr_iid,
             token=token,
-            api_base=api_base
+            api_base=api_base,
+            project_id=str(project.get('id') or '')
         )
 
     def fetch_pr_files(self, context: PRContext) -> list[PRFile]:
         # GitLab uses project ID (URL-encoded path) and MR IID
-        project_id = requests.utils.quote(context.repo, safe='')
+        project_id = self._project_ref(context)
         url = f'{context.api_base}/projects/{project_id}/merge_requests/{context.pr_number}/changes'
         resp = self._gl_request('GET', url, context.token)
         if resp is None or resp.status_code != 200:
@@ -87,7 +88,7 @@ class GitLabProvider(CodeHostProvider):
         return files[:MAX_FILES_PER_MR]
 
     def post_review_comment(self, context: PRContext, body: str) -> bool:
-        project_id = requests.utils.quote(context.repo, safe='')
+        project_id = self._project_ref(context)
         url = f'{context.api_base}/projects/{project_id}/merge_requests/{context.pr_number}/notes'
         resp = self._gl_request('POST', url, context.token, json={'body': body})
         if resp is None or resp.status_code not in (200, 201):
@@ -101,7 +102,7 @@ class GitLabProvider(CodeHostProvider):
 
     def merge_pr(self, context: PRContext) -> bool:
         """Merge the merge request. Return True on success."""
-        project_id = requests.utils.quote(context.repo, safe='')
+        project_id = self._project_ref(context)
         url = f'{context.api_base}/projects/{project_id}/merge_requests/{context.pr_number}/merge'
         resp = self._gl_request('PUT', url, context.token, json={'merge_when_pipeline_succeeds': False})
         if resp is None or resp.status_code not in (200, 201):
@@ -112,7 +113,7 @@ class GitLabProvider(CodeHostProvider):
 
     def close_pr(self, context: PRContext) -> bool:
         """Close the merge request. Return True on success."""
-        project_id = requests.utils.quote(context.repo, safe='')
+        project_id = self._project_ref(context)
         url = f'{context.api_base}/projects/{project_id}/merge_requests/{context.pr_number}'
         resp = self._gl_request('PUT', url, context.token, json={'state_event': 'close'})
         if resp is None or resp.status_code not in (200, 201):
@@ -120,6 +121,12 @@ class GitLabProvider(CodeHostProvider):
             return False
         log.info('gitlab_closed', extra={'mr': context.pr_number, 'repo': context.repo})
         return True
+
+    @staticmethod
+    def _project_ref(context: PRContext) -> str:
+        # Numeric project ID (from webhook payload) always resolves;
+        # encoded path is the fallback and fails for project access tokens on some GitLab setups.
+        return context.project_id or requests.utils.quote(context.repo, safe='')
 
     def _gl_request(self, method: str, url: str, token: str, max_retries: int = 4, **kwargs) -> requests.Response | None:
         headers = {
