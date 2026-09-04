@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -103,7 +103,7 @@ def track_cost(
     if not COST_TABLE:
         return
 
-    pk = f'{provider}:{repo}:{datetime.utcnow().strftime("%Y-%m")}'
+    pk = f'{provider}:{repo}:{datetime.now(UTC).strftime("%Y-%m")}'
     sk = f'PR:{pr_number}'
     ttl = int(time.time()) + (30 * 24 * 3600)  # 30 days
 
@@ -120,7 +120,7 @@ def track_cost(
                 'processing_time_ms': processing_time_ms,
                 'cost_usd': Decimal(str(cost_usd)),
                 'findings_count': findings_count,
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': datetime.now(UTC).isoformat(),
             }
         )
         log.info('cost_tracked', extra={'pk': pk, 'sk': sk, 'cost_usd': cost_usd})
