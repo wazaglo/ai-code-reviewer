@@ -118,3 +118,19 @@ def test_github_user_agent_exempt_from_basic_auth(ing, monkeypatch):
     resp = mod.handler(_event(body, _gh_headers(body)), None)
     assert resp['statusCode'] == 200
     assert len(fake.sent) == 1
+
+
+def test_gitlab_form_body_normalized_to_json(ing, monkeypatch):
+    mod, fake = ing
+    monkeypatch.setitem(mod._webhook_secrets, 'gitlab', 'glsec')
+    form = 'object_kind=merge_request&object_attributes%5Biid%5D=7&object_attributes%5Baction%5D=open&project%5Bpath_with_namespace%5D=g%2Fr'
+    resp = mod.handler(_event(form, {
+        'X-Gitlab-Event': 'Merge Request Hook',
+        'X-Gitlab-Token': 'glsec',
+        'User-Agent': 'GitLab',
+    }), None)
+    assert resp['statusCode'] == 200
+    msg = json.loads(fake.sent[0]['MessageBody'])
+    assert msg['object_kind'] == 'merge_request'
+    assert msg['object_attributes']['iid'] == '7'
+    assert msg['project']['path_with_namespace'] == 'g/r'

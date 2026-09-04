@@ -13,6 +13,8 @@ It:
 import base64
 import json
 import os
+import re
+from urllib.parse import parse_qsl
 
 import boto3
 from provider.factory import detect_provider, verify_signature_for_provider
@@ -49,6 +51,18 @@ def _get_webhook_secret(provider: str) -> str:
 def _verification_enabled(provider: str) -> bool:
     """An empty webhook secret disables signature verification (dry-run)."""
     return bool(_get_webhook_secret(provider))
+
+
+def _form_body_to_json(body: bytes) -> bytes:
+    """Convert GitLab's form-encoded webhook payload (a[b][c]=v) into JSON."""
+    data: dict = {}
+    for key, value in parse_qsl(body.decode('utf-8'), keep_blank_values=True):
+        parts = re.findall(r'[^[\]]+', key)
+        node = data
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+    return json.dumps(data).encode('utf-8')
 
 
 def handler(event, context):
@@ -99,6 +113,9 @@ def handler(event, context):
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({'error': 'Invalid webhook signature'}),
         }
+
+    if provider == 'gitlab' and not payload and body.lstrip().startswith(b'object_kind='):
+        body = _form_body_to_json(body)
 
     try:
         sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=body.decode('utf-8'))
