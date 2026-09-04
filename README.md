@@ -4,6 +4,19 @@ Automatically reviews **GitHub Pull Requests** and **GitLab Merge Requests** wit
 
 ![Architecture](docs/architecture.png)
 
+## Use the hosted service
+
+Want your repo reviewed by the instance I run? Email me at
+[wazaglo87@gmail.com](mailto:wazaglo87@gmail.com) and I'll send you:
+
+- the **payload URL** — the webhook endpoint for your repo's webhook settings
+- the **webhook secret** — the signing secret your webhook must use (kept in
+  AWS Secrets Manager on my side; one shared secret per provider per instance)
+- a **Cognito user**, if you'd rather call the API directly
+
+Then follow the steps in the [Endpoint](#endpoint) section below
+("Connect a repo" or "Call the API yourself").
+
 ## How it works
 
 Your Git provider sends a webhook → **API Gateway** (Cognito-protected, rate-limited) → **Ingest Lambda** verifies it's really from GitHub/GitLab → **SQS** queues it → **Worker Lambda** fetches the diff, asks **Bedrock Nova** for a review → posts the comment on your PR.
