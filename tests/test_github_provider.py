@@ -58,3 +58,31 @@ def test_extract_pr_context_opened(provider):
 
 def test_extract_pr_context_ignores_other_actions(provider):
     assert provider.extract_pr_context({'action': 'closed', 'number': 1}) is None
+
+
+def test_draft_pr_returns_none(provider):
+    payload = {
+        'action': 'opened',
+        'number': 2,
+        'repository': {'full_name': 'a/b'},
+        'pull_request': {'draft': True},
+    }
+    assert provider.extract_pr_context(payload) is None
+
+
+def test_gh_request_retries_rate_limit(provider, monkeypatch):
+    calls = []
+
+    class Resp:
+        def __init__(self, status):
+            self.status_code = status
+            self.headers = {'Retry-After': '0'}
+
+    def fake_request(method, url, **kw):
+        calls.append(url)
+        return Resp(403 if len(calls) < 3 else 200)
+
+    monkeypatch.setattr('provider.github.requests.request', fake_request)
+    monkeypatch.setattr('provider.github.time.sleep', lambda s: None)
+    resp = provider._gh_request('GET', 'https://x/y', 'tok')
+    assert resp.status_code == 200 and len(calls) == 3

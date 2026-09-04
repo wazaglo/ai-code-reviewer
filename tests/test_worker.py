@@ -48,3 +48,19 @@ def test_allowlisted_matches_exact_names(monkeypatch):
     monkeypatch.setattr(w, 'REPO_ALLOWLIST', {'wazaglo/app-a', 'org-b/app-b'})
     assert w.allowlisted('wazaglo/app-a') is True
     assert w.allowlisted('wazaglo/app-c') is False
+
+
+def test_should_merge_or_close_medium_blocks_merge_by_default():
+    assert w.should_merge_or_close([{'severity': 'medium'}]) is None
+
+
+def test_should_merge_or_close_low_only_merges():
+    assert w.should_merge_or_close([{'severity': 'low'}, {'severity': 'none'}]) == 'merge'
+
+
+def test_should_merge_or_close_high_closes():
+    assert w.should_merge_or_close([{'severity': 'low'}, {'severity': 'high'}]) == 'close'
+
+
+def test_should_merge_or_close_empty_merges():
+    assert w.should_merge_or_close([]) == 'merge'

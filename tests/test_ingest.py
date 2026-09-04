@@ -134,3 +134,33 @@ def test_gitlab_form_body_normalized_to_json(ing, monkeypatch):
     assert msg['object_kind'] == 'merge_request'
     assert msg['object_attributes']['iid'] == '7'
     assert msg['project']['path_with_namespace'] == 'g/r'
+
+
+def test_gitlab_wrong_token_rejected(ing, monkeypatch):
+    mod, fake = ing
+    monkeypatch.setitem(mod._webhook_secrets, 'gitlab', 'glsec')
+    resp = mod.handler(_event('{"object_kind":"merge_request"}', {
+        'X-Gitlab-Event': 'Merge Request Hook',
+        'X-Gitlab-Token': 'nope',
+    }), None)
+    assert resp['statusCode'] == 401
+    assert fake.sent == []
+
+
+def test_gitlab_empty_secret_skips_verification(ing, monkeypatch):
+    mod, fake = ing
+    monkeypatch.setitem(mod._webhook_secrets, 'gitlab', '')
+    resp = mod.handler(_event('{"object_kind":"merge_request"}', {'X-Gitlab-Event': 'Merge Request Hook'}), None)
+    assert resp['statusCode'] == 200
+    assert len(fake.sent) == 1
+
+
+def test_gitlab_valid_token_enqueues(ing, monkeypatch):
+    mod, fake = ing
+    monkeypatch.setitem(mod._webhook_secrets, 'gitlab', 'glsec')
+    resp = mod.handler(_event('{"object_kind":"merge_request"}', {
+        'X-Gitlab-Event': 'Merge Request Hook',
+        'X-Gitlab-Token': 'glsec',
+    }), None)
+    assert resp['statusCode'] == 200
+    assert len(fake.sent) == 1

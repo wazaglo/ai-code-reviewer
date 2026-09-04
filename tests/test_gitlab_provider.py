@@ -57,3 +57,54 @@ def test_project_ref_prefers_numeric_id():
 def test_project_ref_falls_back_to_encoded_path():
     ctx = PRContext(provider='gitlab', repo='g/r', pr_number=1, token='t')
     assert GitLabProvider._project_ref(ctx) == 'g%2Fr'
+
+
+def test_extract_sets_numeric_project_id(provider):
+    payload = {
+        'object_kind': 'merge_request',
+        'object_attributes': {'action': 'update', 'iid': 3},
+        'project': {'path_with_namespace': 'g/r', 'id': 641},
+    }
+    ctx = provider.extract_pr_context(payload)
+    assert ctx.project_id == '641'
+
+
+def test_extract_ignores_push_events(provider):
+    assert provider.extract_pr_context({'object_kind': 'push'}) is None
+
+
+def test_extract_ignores_merge_action(provider):
+    payload = {
+        'object_kind': 'merge_request',
+        'object_attributes': {'action': 'merge', 'iid': 3},
+        'project': {'path_with_namespace': 'g/r', 'id': 1},
+    }
+    assert provider.extract_pr_context(payload) is None
+
+
+def test_gl_request_retries_then_succeeds(provider, monkeypatch):
+    calls = []
+
+    class Resp:
+        def __init__(self, status):
+            self.status_code = status
+            self.headers = {}
+
+    def fake_request(method, url, **kw):
+        calls.append(url)
+        return Resp(429 if len(calls) == 1 else 200)
+
+    monkeypatch.setattr('provider.gitlab.requests.request', fake_request)
+    monkeypatch.setattr('provider.gitlab.time.sleep', lambda s: None)
+    resp = provider._gl_request('GET', 'https://x/y', 'tok')
+    assert resp.status_code == 200 and len(calls) == 2
+
+
+def test_gl_request_gives_up_returns_none(provider, monkeypatch):
+    class Resp:
+        status_code = 503
+        headers = {}
+
+    monkeypatch.setattr('provider.gitlab.requests.request', lambda *a, **k: Resp())
+    monkeypatch.setattr('provider.gitlab.time.sleep', lambda s: None)
+    assert provider._gl_request('GET', 'https://x/y', 'tok', max_retries=2) is None

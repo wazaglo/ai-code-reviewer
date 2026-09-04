@@ -45,6 +45,9 @@ class GitHubProvider(CodeHostProvider):
         if not repo_name or not pr_number:
             return None
 
+        if payload.get('pull_request', {}).get('draft'):
+            return None
+
         token = os.environ.get('GITHUB_TOKEN', '')
         return PRContext(
             provider='github',

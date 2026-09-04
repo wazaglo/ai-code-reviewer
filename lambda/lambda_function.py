@@ -219,15 +219,13 @@ def should_merge_or_close(findings: list[dict[str, Any]]) -> str:
     if not findings:
         return 'merge' if MERGE_ON_LOW_SEVERITY else None
 
-    high_count = sum(1 for f in findings if (f.get('severity') or 'medium').lower() == 'high')
+    severities = {(f.get('severity') or 'medium').lower() for f in findings}
 
-    if high_count > 0 and CLOSE_ON_HIGH_SEVERITY:
-        return 'close'
-    if high_count == 0 and MERGE_ON_MEDIUM_SEVERITY:
-        return 'merge'
-    if high_count == 0 and MERGE_ON_LOW_SEVERITY:
-        return 'merge'
-    return None
+    if 'high' in severities:
+        return 'close' if CLOSE_ON_HIGH_SEVERITY else None
+    if 'medium' in severities:
+        return 'merge' if MERGE_ON_MEDIUM_SEVERITY else None
+    return 'merge' if MERGE_ON_LOW_SEVERITY else None
 
 
 def post_provider_comment(provider: CodeHostProvider, context: PRContext, body: str) -> bool:
