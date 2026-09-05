@@ -1,6 +1,6 @@
 # AI Code Reviewer
 
-Automatically reviews **GitHub Pull Requests** and **GitLab Merge Requests** with **Amazon Bedrock (Nova)**. Every PR/MR you open gets an AI comment flagging security holes (hardcoded secrets, SQL injection), code-quality issues, and performance problems — within seconds, for pennies.
+Automatically reviews **GitHub Pull Requests** and **GitLab Merge Requests** with **Amazon Bedrock (Nova)**. Every PR/MR you open gets an AI comment flagging security holes (hardcoded secrets, SQL injection), code-quality issues, and performance problems, within seconds, for pennies.
 
 ![Architecture](docs/architecture.png)
 
@@ -9,8 +9,8 @@ Automatically reviews **GitHub Pull Requests** and **GitLab Merge Requests** wit
 Want your repo reviewed by the instance I run? Email me at
 [wazaglo87@gmail.com](mailto:wazaglo87@gmail.com) and I'll send you:
 
-- the **payload URL** — the webhook endpoint for your repo's webhook settings
-- the **webhook secret** — the signing secret your webhook must use (kept in
+- the **payload URL**: the webhook endpoint for your repo's webhook settings
+- the **webhook secret**: the signing secret your webhook must use (kept in
   AWS Secrets Manager on my side; one shared secret per provider per instance)
 - a **Cognito user**, if you'd rather call the API directly
 
@@ -21,7 +21,7 @@ Then follow the steps in the [Endpoint](#endpoint) section below
 
 Your Git provider sends a webhook → **API Gateway** (Cognito-protected, rate-limited) → **Ingest Lambda** verifies it's really from GitHub/GitLab → **SQS** queues it → **Worker Lambda** fetches the diff, asks **Bedrock Nova** for a review → posts the comment on your PR.
 
-Live since Phase-A testing — sample of a real review:
+Live since Phase-A testing, sample of a real review:
 
 ![AI review comment](docs/screenshots/ai-review-comment.png)
 
@@ -40,11 +40,11 @@ POST https://6f7yrjyyfh.execute-api.us-east-1.amazonaws.com/prod/webhook
 
 ![Endpoint rejects anonymous callers with 403](docs/screenshots/rebuilt-endpoint-403.png)
 
-*Fig 3: The endpoint rejecting an anonymous caller with 403 — only authenticated API clients and verified Git webhooks get through*
+*Fig 3: The endpoint rejecting an anonymous caller with 403, only authenticated API clients and verified Git webhooks get through*
 
 Two ways to talk to it:
 
-### 1. Connect a repo (no auth needed — recommended)
+### 1. Connect a repo (no auth needed: recommended)
 
 Webhooks from GitHub/GitLab are recognized automatically and don't need a token.
 
@@ -61,7 +61,7 @@ Webhooks from GitHub/GitLab are recognized automatically and don't need a token.
 
 > Self-hosted note: the worker calls the GitLab API (fetch diffs, comment, merge/close).
 > If your instance only resolves to a private IP, the Lambda needs a route to it
-> (VPN/DX/PrivateLink or a public egress proxy) — projects are addressed by their
+> (VPN/DX/PrivateLink or a public egress proxy), projects are addressed by their
 > numeric ID from the webhook payload, which works with project access tokens.
 
 Open a PR and watch the AI comment appear. That's it.
