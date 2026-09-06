@@ -54,7 +54,7 @@ Webhooks from GitHub/GitLab are recognized automatically and don't need a token.
 |-------|-------|
 | Payload URL | the endpoint above |
 | Content type | `application/json` |
-| Secret | the value in AWS Secrets Manager (`WebhookSecret-...`) — must match |
+| Secret | the value in AWS Secrets Manager (`WebhookSecret-...`) - must match |
 | Events | **Pull requests** |
 
 **GitLab:** project → Settings → Webhooks → URL above, trigger **Merge request events**, token = the GitLab secret in Secrets Manager. Enable **JSON body** on the hook if your GitLab version supports it (older form-encoded bodies are normalized automatically by the ingest function).
@@ -116,7 +116,7 @@ Environment:
 |---------|-----|
 | Webhook 401 | Hook **Secret** doesn't match the Secrets Manager value |
 | API call 403 | Missing/expired `Authorization: Bearer <token>` |
-| 429 | Over rate limit — slow down |
+| 429 | Over rate limit - slow down |
 | No AI comment | Check Lambda logs: `aws logs tail /aws/lambda/PR-Review-Worker --follow` |
 | Auto-merge not working | Check that `GITHUB_TOKEN` or `GITLAB_TOKEN` has write permissions |
 

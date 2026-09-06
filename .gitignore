@@ -1,4 +1,4 @@
-# Deploy artifacts (built by deploy.sh, uploaded to S3 — never commit)
+# Deploy artifacts (built by deploy.sh, uploaded to S3 - never commit)
 *.zip
 build/
 
@@ -18,7 +18,7 @@ docs/architecture
 .env
 *.out
 
-# Secrets — never commit tokens or credentials
+# Secrets - never commit tokens or credentials
 *.secrets
 secrets.*
 .env.local
