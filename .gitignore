@@ -31,3 +31,7 @@ secrets.*
 .vscode/
 *.swp
 *.swo
+
+# Test/coverage artifacts
+.coverage
+uv.lock

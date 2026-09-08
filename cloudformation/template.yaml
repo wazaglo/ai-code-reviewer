@@ -248,6 +248,7 @@ Resources:
     Properties:
       QueueName: !Ref QueueName
       VisibilityTimeout: !Ref VisibilityTimeout
+      ReceiveMessageWaitTimeSeconds: 20
       MessageRetentionPeriod: 345600
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt ReviewQueueDLQ.Arn
@@ -492,7 +493,8 @@ Resources:
     Properties:
       FunctionName: !Ref WorkerFunction
       EventSourceArn: !GetAtt ReviewQueue.Arn
-      BatchSize: 1
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 5
       Enabled: true
 
   # ==================================================================
